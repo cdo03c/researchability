@@ -72,10 +72,13 @@ def eval_g1_10_psych_pap_adherence(ctx: EvaluationContext) -> GateResult:
     """Verify OSF/AsPredicted preregistration link and confirmatory/deviation clarity."""
 
     def fallback(c: EvaluationContext) -> GateResult:
+        is_reg = bool(c.paper.metadata.get("is_registration"))
         prereg_links = [
             link.url
             for link in c.paper.artifacts.links
-            if link.kind == "prereg" or link.host in {"osf", "aspredicted", "clinicaltrials"}
+            if link.kind == "prereg"
+            or link.host in {"aspredicted", "clinicaltrials"}
+            or (link.host == "osf" and is_reg)
         ]
         if prereg_links:
             return GateResult(

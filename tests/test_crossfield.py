@@ -11,7 +11,10 @@ from typer.testing import CliRunner
 from researchability.cli import app
 from researchability.connectors import IcpsrConnector, OsfConnector, extract_artifact_links
 from researchability.gates import evaluate_stage0_to_3, evaluate_stage0_to_5_with_context
+from researchability.gates.base import EvaluationContext
+from researchability.gates.stage_crossfield import eval_g1_10_psych_pap_adherence
 from researchability.models import (
+    ArtifactLink,
     ArtifactManifest,
     ArtifactStatus,
     FieldProfile,
@@ -257,3 +260,60 @@ def test_economics_overlay_and_repframe_cli_export(tmp_path: Path) -> None:
 
     # Silence unused import lint while asserting execute runner supports crossfield gates
     _ = evaluate_stage0_to_5_with_context
+
+
+def test_calibration_regressions_non_reg_osf_and_blocked_remote_manifest() -> None:
+    non_reg_paper = PaperBundle(
+        paper_id="osf:67pcn",
+        source_repo="osf",
+        title="Exploratory Graph Analysis Method Study",
+        published_year=2026,
+        primary_profile=FieldProfile.PSYCHOLOGY_SOCIAL,
+        abstract=(
+            "We evaluate psychometric reliability across simulation datasets "
+            "(n = 200, accuracy = 0.90)."
+        ),
+        full_text="Simulation dataset (n = 200, accuracy = 0.90).",
+        artifacts=ArtifactManifest(
+            links=[
+                ArtifactLink(
+                    url="https://osf.io/67pcn/",
+                    kind="data",
+                    host="osf",
+                    status=ArtifactStatus.RESOLVED,
+                )
+            ]
+        ),
+        metadata={"is_registration": False},
+    )
+    non_reg_report = evaluate_stage0_to_3(non_reg_paper)
+    non_reg_by_id = {res.gate_id: res for res in non_reg_report.gate_results}
+    assert non_reg_by_id["G1.7_PREREGISTRATION_DISCLOSED"].status == GateStatus.FAIL
+    assert (
+        eval_g1_10_psych_pap_adherence(EvaluationContext(paper=non_reg_paper)).status
+        == GateStatus.FAIL
+    )
+
+    oversized_dv = PaperBundle(
+        paper_id="dataverse:doi:10.7910/DVN/BIG",
+        source_repo="dataverse",
+        title="Oversized Remote Dataset",
+        published_year=2024,
+        primary_profile=FieldProfile.ECONOMICS,
+        abstract="Empirical panel dataset (n = 5000, p = 0.01).",
+        full_text="Empirical panel dataset (n = 5000, p = 0.01).",
+        artifacts=ArtifactManifest(
+            links=[
+                ArtifactLink(
+                    url="https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/BIG",
+                    kind="data",
+                    host="dataverse",
+                    status=ArtifactStatus.BLOCKED_DATA_SIZE,
+                )
+            ],
+            data_files=["large_matrix.tab"],
+        ),
+    )
+    dv_report = evaluate_stage0_to_3(oversized_dv)
+    dv_by_id = {res.gate_id: res for res in dv_report.gate_results}
+    assert dv_by_id["G1.2_DATA_ACCESSIBLE"].status == GateStatus.BLOCKED_DATA_SIZE

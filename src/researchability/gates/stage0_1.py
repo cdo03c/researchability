@@ -22,7 +22,8 @@ _EMPIRICAL_RE = re.compile(
 )
 _PREREG_RE = re.compile(
     r"(preregister|pre-register|pre-analysis plan|\bpap\b|aspredicted|"
-    r"osf\.io/[a-z0-9]+/registr|clinicaltrials\.gov|exploratory)",
+    r"osf\.io/[a-z0-9]+/registr|clinicaltrials\.gov|"
+    r"exploratory\s+(?:study|analysis|research|work))",
     re.IGNORECASE,
 )
 _LIMITATIONS_RE = re.compile(
@@ -102,36 +103,21 @@ def eval_g1_1_data_link_present(ctx: EvaluationContext) -> GateResult:
 
 def eval_g1_2_data_accessible(ctx: EvaluationContext) -> GateResult:
     """Determine if referenced data artifacts resolve and are accessible."""
-    if ctx.paper.artifacts.data_files:
+    local_data = ctx.resolve_relative_files(ctx.paper.artifacts.data_files)
+    if local_data:
         return GateResult(
             gate_id="G1.2_DATA_ACCESSIBLE",
             status=GateStatus.PASS,
-            rationale=f"Found {len(ctx.paper.artifacts.data_files)} accessible data file(s).",
+            rationale=f"Found {len(local_data)} accessible local data file(s).",
             evidence=[
                 EvidenceItem(
                     source="workspace",
-                    excerpt=", ".join(ctx.paper.artifacts.data_files[:5]),
+                    excerpt=", ".join(str(p.name) for p in local_data[:5]),
                 )
             ],
         )
 
     data_links = [lnk for lnk in ctx.paper.artifacts.links if lnk.kind == "data"]
-    if not data_links:
-        return GateResult(
-            gate_id="G1.2_DATA_ACCESSIBLE",
-            status=GateStatus.FAIL,
-            rationale="No resolvable data links available.",
-        )
-
-    if any(lnk.status == ArtifactStatus.RESOLVED for lnk in data_links):
-        resolved = [lnk.url for lnk in data_links if lnk.status == ArtifactStatus.RESOLVED]
-        return GateResult(
-            gate_id="G1.2_DATA_ACCESSIBLE",
-            status=GateStatus.PASS,
-            rationale="At least one data link resolved cleanly.",
-            evidence=[EvidenceItem(source="artifact_resolver", excerpt=resolved[0])],
-        )
-
     if any(lnk.status == ArtifactStatus.BLOCKED_ACCESS for lnk in data_links):
         return GateResult(
             gate_id="G1.2_DATA_ACCESSIBLE",
@@ -146,6 +132,37 @@ def eval_g1_2_data_accessible(ctx: EvaluationContext) -> GateResult:
             status=GateStatus.BLOCKED_DATA_SIZE,
             rationale="Dataset exceeds configured download size budget.",
             flags=["Dataset too large for automated download"],
+        )
+
+    if ctx.paper.artifacts.data_files and not any(
+        lnk.status == ArtifactStatus.BROKEN_404 for lnk in data_links
+    ):
+        return GateResult(
+            gate_id="G1.2_DATA_ACCESSIBLE",
+            status=GateStatus.PASS,
+            rationale=f"Found {len(ctx.paper.artifacts.data_files)} accessible data file(s).",
+            evidence=[
+                EvidenceItem(
+                    source="workspace",
+                    excerpt=", ".join(ctx.paper.artifacts.data_files[:5]),
+                )
+            ],
+        )
+
+    if not data_links:
+        return GateResult(
+            gate_id="G1.2_DATA_ACCESSIBLE",
+            status=GateStatus.FAIL,
+            rationale="No resolvable data links available.",
+        )
+
+    if any(lnk.status == ArtifactStatus.RESOLVED for lnk in data_links):
+        resolved = [lnk.url for lnk in data_links if lnk.status == ArtifactStatus.RESOLVED]
+        return GateResult(
+            gate_id="G1.2_DATA_ACCESSIBLE",
+            status=GateStatus.PASS,
+            rationale="At least one data link resolved cleanly.",
+            evidence=[EvidenceItem(source="artifact_resolver", excerpt=resolved[0])],
         )
 
     return GateResult(

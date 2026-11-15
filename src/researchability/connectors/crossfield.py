@@ -77,12 +77,19 @@ class OsfConnector(HttpConnector):
     ) -> PaperBundle:
         """Fetch an OSF node, registration, or PsyArXiv preprint metadata bundle."""
         node_id = _extract_osf_node_id(identifier)
-        endpoint = (
-            f"{self.base_url}/preprints/{node_id}/"
-            if is_preprint or "psyarxiv" in identifier.lower() or "10.31234" in identifier.lower()
-            else f"{self.base_url}/nodes/{node_id}/"
-        )
-        resp = self.client.get(endpoint)
+        lowered = identifier.lower()
+        if is_preprint or "psyarxiv" in lowered or "10.31234" in lowered:
+            endpoint = f"{self.base_url}/preprints/{node_id}/"
+            resp = self.client.get(endpoint)
+        elif "registrations" in lowered:
+            endpoint = f"{self.base_url}/registrations/{node_id}/"
+            resp = self.client.get(endpoint)
+        else:
+            resp = self.client.get(f"{self.base_url}/nodes/{node_id}/")
+            if resp.status_code == 404:
+                reg_resp = self.client.get(f"{self.base_url}/registrations/{node_id}/")
+                if reg_resp.status_code < 400:
+                    resp = reg_resp
         resp.raise_for_status()
         payload: dict[str, Any] = resp.json().get("data", {})
         attrs: dict[str, Any] = payload.get("attributes", {})

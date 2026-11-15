@@ -7,8 +7,8 @@ Copy `.env.example` to `.env` and configure:
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
 | `GEMINI_API_KEY` | *(required for live calls)* | Google Gemini API key used by `google-genai` |
-| `RESEARCHABILITY_FAST_MODEL` | `gemini-2.5-flash` | Model for fast Stage 0–2 extraction/triage |
-| `RESEARCHABILITY_REASONING_MODEL` | `gemini-2.5-pro` | Model for deeper Stage 3/5 verification |
+| `RESEARCHABILITY_FAST_MODEL` | `gemini-3.5-flash` | Model for fast Stage 0–2 extraction/triage |
+| `RESEARCHABILITY_REASONING_MODEL` | `gemini-3.5-flash` | Model for deeper Stage 3/5 verification |
 | `RESEARCHABILITY_CACHE_DIR` | `.researchability_cache` | Directory storing `llm_cache.sqlite` |
 
 ## Commands

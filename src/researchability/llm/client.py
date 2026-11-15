@@ -39,11 +39,14 @@ class GeminiConfig:
     """Configuration for Gemini API calls and local response caching."""
 
     api_key: str | None = None
-    fast_model: str = "gemini-2.5-flash"
-    reasoning_model: str = "gemini-2.5-pro"
+    fast_model: str = "gemini-3.5-flash"
+    reasoning_model: str = "gemini-3.5-flash"
     temperature: float = 0.0
     cache_path: Path = Path(".researchability_cache/llm_cache.sqlite")
     min_request_interval_sec: float = 0.0
+    max_retries: int = 3
+    retry_backoff_sec: float = 1.5
+    timeout_ms: int = 60_000
 
     @classmethod
     def from_env(cls, load_dotenv_file: bool = True) -> GeminiConfig:
@@ -53,8 +56,8 @@ class GeminiConfig:
         cache_dir = Path(os.getenv("RESEARCHABILITY_CACHE_DIR", ".researchability_cache"))
         return cls(
             api_key=os.getenv("GEMINI_API_KEY"),
-            fast_model=os.getenv("RESEARCHABILITY_FAST_MODEL", "gemini-2.5-flash"),
-            reasoning_model=os.getenv("RESEARCHABILITY_REASONING_MODEL", "gemini-2.5-pro"),
+            fast_model=os.getenv("RESEARCHABILITY_FAST_MODEL", "gemini-3.5-flash"),
+            reasoning_model=os.getenv("RESEARCHABILITY_REASONING_MODEL", "gemini-3.5-flash"),
             temperature=0.0,
             cache_path=cache_dir / "llm_cache.sqlite",
             min_request_interval_sec=float(os.getenv("RESEARCHABILITY_MIN_INTERVAL_SEC", "0.0")),
@@ -197,8 +200,12 @@ class GeminiClient:
                 "GEMINI_API_KEY is not set. Export GEMINI_API_KEY or add it to .env."
             )
         from google import genai
+        from google.genai import types
 
-        self._sdk_client = genai.Client(api_key=self.config.api_key)
+        self._sdk_client = genai.Client(
+            api_key=self.config.api_key,
+            http_options=types.HttpOptions(timeout=self.config.timeout_ms),
+        )
         return self._sdk_client
 
     def _default_transport(
@@ -218,14 +225,44 @@ class GeminiClient:
             response_schema=schema_cls,
             system_instruction=system_instruction or None,
         )
-        try:
-            response = client.models.generate_content(
-                model=model_id,
-                contents=prompt,
-                config=config,
-            )
-        except Exception as exc:  # pragma: no cover - live API errors
-            raise GeminiApiError(f"Gemini API call failed for model {model_id}: {exc}") from exc
+        last_exc: Exception | None = None
+        response: Any = None
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model_id,
+                    contents=prompt,
+                    config=config,
+                )
+                break
+            except Exception as exc:  # pragma: no cover - live API errors
+                last_exc = exc
+                msg = str(exc)
+                msg_lower = msg.lower()
+                is_daily_quota = "perday" in msg_lower or "per day" in msg_lower
+                is_transient = not is_daily_quota and any(
+                    token in msg_lower
+                    for token in (
+                        "429",
+                        "503",
+                        "504",
+                        "unavailable",
+                        "deadline",
+                        "timed out",
+                        "timeout",
+                        "connection",
+                    )
+                )
+                if not is_transient or attempt >= self.config.max_retries:
+                    raise GeminiApiError(
+                        f"Gemini API call failed for model {model_id}: {exc}"
+                    ) from exc
+                time.sleep(self.config.retry_backoff_sec * (2**attempt))
+
+        if response is None and last_exc is not None:  # pragma: no cover
+            raise GeminiApiError(
+                f"Gemini API call failed for model {model_id}: {last_exc}"
+            ) from last_exc
 
         text = getattr(response, "text", None)
         if not isinstance(text, str) or not text:
