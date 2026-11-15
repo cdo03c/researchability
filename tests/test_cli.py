@@ -18,8 +18,15 @@ def test_package_version_is_0_0_0() -> None:
 def test_cli_help_lists_subcommands() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for cmd in ("gates", "score", "batch", "report"):
+    for cmd in ("gates", "ingest", "score", "batch", "report"):
         assert cmd in result.stdout
+
+
+def test_cli_ingest_help_lists_repositories() -> None:
+    result = runner.invoke(app, ["ingest", "--help"])
+    assert result.exit_code == 0
+    assert "arxiv" in result.stdout
+    assert "dataverse" in result.stdout
 
 
 def test_cli_gates_profile_filtering() -> None:

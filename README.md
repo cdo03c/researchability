@@ -34,6 +34,7 @@ uv run mypy src
 
 ## Documentation & Changelog
 
-- Documentation lives in [`docs/`](docs/index.md) and builds with `uv sync --extra docs && uv run mkdocs build --strict`.
+- Start with the [**User Guide**](docs/user-guide.md) for what Researchability does and how to run it step by step.
+- Full documentation lives in [`docs/`](docs/index.md) and builds with `uv sync --extra docs && uv run mkdocs build --strict`.
 - Release history is tracked in [`CHANGELOG.md`](CHANGELOG.md).
 - License: [`LICENSE`](LICENSE) (MIT).

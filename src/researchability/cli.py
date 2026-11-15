@@ -8,6 +8,7 @@ from typing import Annotated
 
 import typer
 
+from researchability.connectors import ArtifactResolver, ArxivConnector, DataverseConnector
 from researchability.models import AuditReport, FieldProfile, GateResult, PaperBundle
 from researchability.registry import GateRegistry
 from researchability.scoring import compute_audit_report, render_markdown_summary
@@ -17,6 +18,13 @@ app = typer.Typer(
     help="Automated staged binary-gate reproducibility & research integrity scoring.",
     no_args_is_help=True,
 )
+
+ingest_app = typer.Typer(
+    name="ingest",
+    help="Fetch papers and replication bundles from research repositories.",
+    no_args_is_help=True,
+)
+app.add_typer(ingest_app, name="ingest")
 
 
 @app.command()
@@ -50,6 +58,71 @@ def gates(
             f"  Stage {gate.stage} | {gate.id:<34} | {gate.problem_domain.value:<22} | "
             f"{gate.evaluator_kind.value}{deps}"
         )
+
+
+@ingest_app.command("arxiv")
+def ingest_arxiv(
+    arxiv_id: Annotated[str, typer.Argument(help="arXiv identifier or URL (e.g., 2401.00001).")],
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Optional PaperBundle JSON output path."),
+    ] = None,
+    workdir: Annotated[
+        Path | None,
+        typer.Option("--workdir", "-w", help="Workspace directory for downloaded source/repos."),
+    ] = None,
+    resolve_artifacts: Annotated[
+        bool,
+        typer.Option("--resolve-artifacts/--no-resolve-artifacts", help="Resolve outbound links."),
+    ] = True,
+) -> None:
+    """Ingest an arXiv paper into a normalized PaperBundle."""
+    with ArxivConnector() as connector, ArtifactResolver() as resolver:
+        bundle = connector.fetch_paper(arxiv_id, workdir=workdir)
+        if resolve_artifacts:
+            bundle = resolver.resolve_bundle(bundle, workdir=workdir)
+
+    payload = bundle.model_dump_json(indent=2)
+    if output:
+        output.write_text(payload + "\n", encoding="utf-8")
+        typer.echo(f"Wrote PaperBundle to {output}")
+    else:
+        typer.echo(payload)
+
+
+@ingest_app.command("dataverse")
+def ingest_dataverse(
+    persistent_id: Annotated[
+        str,
+        typer.Argument(help="Harvard Dataverse persistentId (e.g., doi:10.7910/DVN/XXXXXX)."),
+    ],
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Optional PaperBundle JSON output path."),
+    ] = None,
+    workdir: Annotated[
+        Path | None,
+        typer.Option("--workdir", "-w", help="Workspace directory for downloaded files."),
+    ] = None,
+    download_files: Annotated[
+        bool,
+        typer.Option("--download/--manifest-only", help="Download accessible replication files."),
+    ] = True,
+) -> None:
+    """Ingest a Harvard Dataverse dataset into a normalized PaperBundle."""
+    with DataverseConnector() as connector:
+        bundle = connector.fetch_dataset(
+            persistent_id,
+            workdir=workdir,
+            download_files=download_files and workdir is not None,
+        )
+
+    payload = bundle.model_dump_json(indent=2)
+    if output:
+        output.write_text(payload + "\n", encoding="utf-8")
+        typer.echo(f"Wrote PaperBundle to {output}")
+    else:
+        typer.echo(payload)
 
 
 @app.command()

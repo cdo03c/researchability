@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Milestone 2 repository connectors (`TRE-92`, `TRE-93`, `TRE-94`):
+  - `ArxivConnector`: Atom API search, LaTeX source archive parsing (with `pypdf` PDF fallback), section/table extraction, and category-to-profile inference.
+  - `DataverseConnector`: Harvard Dataverse Search & Dataset APIs, file manifest classification, download budget checks, and `BLOCKED_ACCESS`/`BLOCKED_DATA_SIZE` detection.
+  - `ArtifactResolver`: Outbound URL/DOI link classifier and verifier for GitHub (including stub-only detection), Zenodo, OSF, and HTTP targets.
+  - CLI `researchability ingest arxiv` and `researchability ingest dataverse` commands.
+- User Guide (`docs/user-guide.md`) explaining what Researchability does and how to use it.
+
 ### Planned
-- Milestone 2: arXiv, Harvard Dataverse, and outbound artifact connectors (`TRE-92`, `TRE-93`, `TRE-94`).
 - Milestone 3: Stage 0–3 automated evaluators and forensic data integrity screening (`TRE-95`–`TRE-98`).
 - Milestone 4: Isolated Docker sandbox execution and output fidelity verification (`TRE-99`–`TRE-101`).
 
