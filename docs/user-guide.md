@@ -82,9 +82,18 @@ uv run researchability ingest dataverse "doi:10.7910/DVN/EXAMPLE" \
 
 *(Pass `--manifest-only` on Dataverse or `--no-resolve-artifacts` on arXiv to inspect metadata without downloading files or cloning repos.)*
 
-### 4. Score Gate Results and Generate a Human Dossier
+### 4. Run Automated Stage 0–3 Audits and Generate a Human Dossier
 
-Given a `PaperBundle` JSON and evaluated `GateResult` JSON list:
+Run the automated Stage 0–3 gate evaluators (offline heuristics by default, or add `--use-llm` to enable Gemini API verification):
+
+```bash
+uv run researchability audit ./workspaces/2401.00001/bundle.json \
+  --workdir ./workspaces/2401.00001 \
+  --output audit_report.json \
+  --markdown review_dossier.md
+```
+
+Or aggregate pre-evaluated `GateResult` JSONs directly:
 
 ```bash
 uv run researchability score bundle.json results.json -o audit_report.json

@@ -15,8 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - CLI `researchability ingest arxiv` and `researchability ingest dataverse` commands.
 - User Guide (`docs/user-guide.md`) explaining what Researchability does and how to use it.
 
+- Milestone 3 Stage 0–3 gate evaluators & data-integrity forensics (`TRE-95`–`TRE-98`):
+  - Stage 0–1 evaluators (`stage0_1.py`): empirical claim triage, data/code link & prep-script checks, methods completeness, preregistration disclosure, and null/negative reporting.
+  - Stage 2 evaluators (`stage2.py`): README entrypoint checks, manifest & pinned-version checks, stochastic seed controls, hardware specs, and bioinformatics reference-build checks (`G2.6`).
+  - Stage 3 design & statistical rigor (`stage3_design_stats.py`): sample-size extraction, power/budget checks, controls/baselines, uncertainty intervals, multiple-testing checks, and static pre-split leakage detection.
+  - Data profiler & forensic screening (`profiler/data_profiler.py`, `profiler/forensics.py`, `stage3_integrity.py`): CSV/TSV/JSON/JSONL/NPY/Parquet profiling against claimed `N`, undisclosed exclusion audits, GRIM granularity checks, and pure-Python `t`/`z`/`chi2` `p`-value consistency checks.
+  - CLI `researchability audit` command running Stage 0–3 end-to-end (`--offline` or `--use-llm`).
+
 ### Planned
-- Milestone 3: Stage 0–3 automated evaluators and forensic data integrity screening (`TRE-95`–`TRE-98`).
 - Milestone 4: Isolated Docker sandbox execution and output fidelity verification (`TRE-99`–`TRE-101`).
 
 ## [0.0.0] - 2026-11-14

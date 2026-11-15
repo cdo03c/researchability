@@ -9,6 +9,8 @@ from typing import Annotated
 import typer
 
 from researchability.connectors import ArtifactResolver, ArxivConnector, DataverseConnector
+from researchability.gates import evaluate_stage0_to_3
+from researchability.llm import GeminiClient
 from researchability.models import AuditReport, FieldProfile, GateResult, PaperBundle
 from researchability.registry import GateRegistry
 from researchability.scoring import compute_audit_report, render_markdown_summary
@@ -156,6 +158,59 @@ def score(
         typer.echo(f"Wrote AuditReport to {output}")
     else:
         typer.echo(payload)
+
+
+@app.command()
+def audit(
+    bundle_path: Annotated[
+        Path,
+        typer.Argument(exists=True, help="Path to a PaperBundle JSON file."),
+    ],
+    workdir: Annotated[
+        Path | None,
+        typer.Option(
+            "--workdir", "-w", help="Workspace directory containing downloaded artifacts."
+        ),
+    ] = None,
+    use_llm: Annotated[
+        bool,
+        typer.Option(
+            "--use-llm/--offline",
+            help="Use Gemini API for LLM-assisted gates (default: offline heuristics).",
+        ),
+    ] = False,
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Optional AuditReport JSON output path."),
+    ] = None,
+    markdown: Annotated[
+        Path | None,
+        typer.Option("--markdown", "-m", help="Optional Markdown summary output path."),
+    ] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option("--config", "-c", help="Optional custom gates.yaml."),
+    ] = None,
+) -> None:
+    """Run automated Stage 0-3 reproducibility & integrity gates on a PaperBundle."""
+    paper = PaperBundle.model_validate_json(bundle_path.read_text(encoding="utf-8"))
+    registry = GateRegistry.from_yaml(config)
+    llm_client = GeminiClient() if use_llm else None
+    report_obj = evaluate_stage0_to_3(
+        paper=paper,
+        registry=registry,
+        workdir=workdir,
+        llm=llm_client,
+    )
+    payload = report_obj.model_dump_json(indent=2)
+    if output:
+        output.write_text(payload + "\n", encoding="utf-8")
+        typer.echo(f"Wrote AuditReport to {output}")
+    else:
+        typer.echo(payload)
+    if markdown:
+        markdown.write_text(render_markdown_summary(report_obj), encoding="utf-8")
+        typer.echo(f"Wrote Markdown summary to {markdown}")
 
 
 @app.command()
