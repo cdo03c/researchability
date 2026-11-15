@@ -7,6 +7,9 @@
 - `src/researchability/registry.py` — Loads `gates.yaml`, validates acyclic stage-ordered dependencies, and filters active gates by `FieldProfile`.
 - `src/researchability/llm/client.py` — `GeminiClient` wrapper around `google-genai` enforcing `temperature=0.0`, Pydantic structured outputs, `FAST`/`REASONING` model tiers, and a SQLite cache keyed by `(paper_id, gate_id, prompt_version, model_id, input_hash)`.
 - `src/researchability/scoring/aggregator.py` — Propagates dependency outcomes, calculates `funnel_depth` (`0`–`5`), domain pass rates, composite score, `zero_touch_reproducible` vs. `repaired_reproducible`, and Markdown summaries.
+- `src/researchability/profiler/` — Deterministic tabular/array data profiler and statistical forensic screeners (GRIM granularity, `p`-value consistency).
+- `src/researchability/sandbox/` — Hardened Docker execution runner (`--network=none`, CPU/RAM/timeout caps, non-root, `:ro` data mounts) and `G4.1` hardware/size preflight.
+- `src/researchability/gates/` — Staged binary-gate evaluators across Stages 0–5 (`stage0_1`, `stage2`, `stage3_design_stats`, `stage3_integrity`, `stage4_execution`, `stage5_verification`) and orchestrated `runner.py`.
 - `src/researchability/cli.py` — Typer CLI (`researchability`).
 
 ## Reproducible LLM Usage

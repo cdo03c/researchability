@@ -82,7 +82,7 @@ uv run researchability ingest dataverse "doi:10.7910/DVN/EXAMPLE" \
 
 *(Pass `--manifest-only` on Dataverse or `--no-resolve-artifacts` on arXiv to inspect metadata without downloading files or cloning repos.)*
 
-### 4. Run Automated Stage 0–3 Audits and Generate a Human Dossier
+### 4. Run Automated Audits, Sandboxed Execution & Generate a Human Dossier
 
 Run the automated Stage 0–3 gate evaluators (offline heuristics by default, or add `--use-llm` to enable Gemini API verification):
 
@@ -90,7 +90,18 @@ Run the automated Stage 0–3 gate evaluators (offline heuristics by default, or
 uv run researchability audit ./workspaces/2401.00001/bundle.json \
   --workdir ./workspaces/2401.00001 \
   --output audit_report.json \
-  --markdown review_dossier.md
+  --markdown review_summary.md
+```
+
+To execute the paper's preparation and main analysis scripts inside an offline, resource-capped Docker sandbox (Stages 4–5) and generate the full I4R-style human debate dossier:
+
+```bash
+uv run researchability audit ./workspaces/2401.00001/bundle.json \
+  --workdir ./workspaces/2401.00001 \
+  --execute \
+  --timeout 300 \
+  --output audit_report.json \
+  --dossier human_dossier.md
 ```
 
 Or aggregate pre-evaluated `GateResult` JSONs directly:
@@ -125,5 +136,7 @@ with ArxivConnector() as arxiv, ArtifactResolver() as resolver:
 ## Project Roadmap Status
 
 - **Milestone 1 (Complete):** Core schemas, `gates.yaml` DAG registry, Gemini API structured client with SQLite cache, and scoring aggregator.
-- **Milestone 2 (Current):** arXiv connector, Harvard Dataverse connector, and outbound artifact resolver (GitHub, Zenodo, OSF, DOIs).
-- **Upcoming (M3–M6):** Automated Stage 0–3 gate evaluators & forensic checks, isolated Docker execution & numeric output diffing, batch DuckDB/Parquet sweeps, human benchmark calibration, and cross-field overlays.
+- **Milestone 2 (Complete):** arXiv connector, Harvard Dataverse connector, and outbound artifact resolver (GitHub, Zenodo, OSF, DOIs).
+- **Milestone 3 (Complete):** Automated Stage 0–3 gate evaluators, schema profiler, and GRIM/`p`-value forensic checks.
+- **Milestone 4 (Complete):** Hardened Docker sandbox runner, separate zero-touch (`G4.4`) vs. diff-logged repair (`G4.5`) execution, Stage 5 numeric verification (`G5.1`), artifact checks (`G5.2`), and I4R-style human debate dossier synthesis (`G5.3`).
+- **Upcoming (M5–M6):** Large-scale DuckDB/Parquet batch sweeps, human benchmark calibration, and cross-field overlays.

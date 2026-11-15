@@ -9,10 +9,15 @@ from typing import Annotated
 import typer
 
 from researchability.connectors import ArtifactResolver, ArxivConnector, DataverseConnector
-from researchability.gates import evaluate_stage0_to_3
+from researchability.gates import (
+    evaluate_stage0_to_3,
+    evaluate_stage0_to_5_with_context,
+    render_human_dossier,
+)
 from researchability.llm import GeminiClient
 from researchability.models import AuditReport, FieldProfile, GateResult, PaperBundle
 from researchability.registry import GateRegistry
+from researchability.sandbox import SandboxConfig
 from researchability.scoring import compute_audit_report, render_markdown_summary
 
 app = typer.Typer(
@@ -187,21 +192,58 @@ def audit(
         Path | None,
         typer.Option("--markdown", "-m", help="Optional Markdown summary output path."),
     ] = None,
+    dossier: Annotated[
+        Path | None,
+        typer.Option(
+            "--dossier",
+            "-d",
+            help="Optional I4R-style human review & debate dossier Markdown path.",
+        ),
+    ] = None,
+    execute: Annotated[
+        bool,
+        typer.Option(
+            "--execute/--no-execute",
+            help="Run Stage 4-5 sandboxed Docker execution and output verification.",
+        ),
+    ] = False,
+    timeout: Annotated[
+        int,
+        typer.Option(
+            "--timeout",
+            help="Hard timeout in seconds per sandboxed container command (with --execute).",
+        ),
+    ] = 300,
     config: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Optional custom gates.yaml."),
     ] = None,
 ) -> None:
-    """Run automated Stage 0-3 reproducibility & integrity gates on a PaperBundle."""
+    """Run automated Stage 0-3 (or Stage 0-5 with --execute) reproducibility gates."""
     paper = PaperBundle.model_validate_json(bundle_path.read_text(encoding="utf-8"))
     registry = GateRegistry.from_yaml(config)
     llm_client = GeminiClient() if use_llm else None
-    report_obj = evaluate_stage0_to_3(
-        paper=paper,
-        registry=registry,
-        workdir=workdir,
-        llm=llm_client,
-    )
+    dossier_md: str | None = None
+
+    if execute:
+        report_obj, ctx = evaluate_stage0_to_5_with_context(
+            paper=paper,
+            registry=registry,
+            workdir=workdir,
+            llm=llm_client,
+            sandbox_config=SandboxConfig(timeout_seconds=timeout),
+        )
+        raw_dossier = ctx.extracted_claims.get("human_dossier_markdown")
+        if isinstance(raw_dossier, str):
+            dossier_md = raw_dossier
+    else:
+        report_obj = evaluate_stage0_to_3(
+            paper=paper,
+            registry=registry,
+            workdir=workdir,
+            llm=llm_client,
+        )
+
     payload = report_obj.model_dump_json(indent=2)
     if output:
         output.write_text(payload + "\n", encoding="utf-8")
@@ -211,6 +253,12 @@ def audit(
     if markdown:
         markdown.write_text(render_markdown_summary(report_obj), encoding="utf-8")
         typer.echo(f"Wrote Markdown summary to {markdown}")
+    if dossier:
+        dossier.write_text(
+            dossier_md or render_human_dossier(report_obj, paper=paper),
+            encoding="utf-8",
+        )
+        typer.echo(f"Wrote Human Dossier to {dossier}")
 
 
 @app.command()

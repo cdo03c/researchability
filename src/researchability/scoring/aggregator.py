@@ -19,7 +19,7 @@ from researchability.models import (
 from researchability.registry import GateRegistry
 
 
-def _resolve_dependency_override(
+def resolve_dependency_override(
     gate: GateDefinition,
     resolved: dict[str, GateResult],
 ) -> GateResult | None:
@@ -117,7 +117,7 @@ def compute_audit_report(
     human_flags: list[str] = []
 
     for gate in active_gates:
-        override = _resolve_dependency_override(gate, resolved)
+        override = resolve_dependency_override(gate, resolved)
         if override is not None:
             result = override
         elif gate.id in raw_results:

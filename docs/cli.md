@@ -18,6 +18,12 @@ Copy `.env.example` to `.env` and configure:
 researchability gates --profile ml_cs
 researchability gates --profile bioinformatics
 
+# Run Stage 0–3 offline/LLM audit without container execution
+researchability audit bundle.json --workdir ./workspaces/demo -o audit_report.json -m summary.md
+
+# Run full Stage 0–5 audit with isolated Docker execution and I4R human review dossier
+researchability audit bundle.json --workdir ./workspaces/demo --execute -o audit_report.json --dossier dossier.md
+
 # Aggregate pre-evaluated gate results into an AuditReport
 researchability score paper_bundle.json gate_results.json -o audit_report.json
 

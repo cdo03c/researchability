@@ -21,9 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Stage 3 design & statistical rigor (`stage3_design_stats.py`): sample-size extraction, power/budget checks, controls/baselines, uncertainty intervals, multiple-testing checks, and static pre-split leakage detection.
   - Data profiler & forensic screening (`profiler/data_profiler.py`, `profiler/forensics.py`, `stage3_integrity.py`): CSV/TSV/JSON/JSONL/NPY/Parquet profiling against claimed `N`, undisclosed exclusion audits, GRIM granularity checks, and pure-Python `t`/`z`/`chi2` `p`-value consistency checks.
   - CLI `researchability audit` command running Stage 0–3 end-to-end (`--offline` or `--use-llm`).
+- Milestone 4 Sandboxed Execution & Output Verification (`TRE-99`, `TRE-100`, `TRE-101`):
+  - Isolated Docker sandbox harness (`sandbox/docker_runner.py`): Python/R Dockerfile generation, `--network=none`, `--cpus`, `--memory`, `--user=65534:65534`, `--cap-drop=ALL`, read-only `/data:ro` mounts, hard timeouts, created/modified output file diffing, and `G4.1` preflight (`BLOCKED_HARDWARE` / `BLOCKED_DATA_SIZE`).
+  - Stage 4 execution gates (`gates/stage4_execution.py`): container build (`G4.2`), data-prep run (`G4.3`), separate unmodified zero-touch execution (`G4.4`), and bounded diff-logged minor mechanical repair execution (`G4.5`).
+  - Stage 5 output fidelity verifier & I4R-style human debate dossier generator (`gates/stage5_verification.py`): reported-vs-reproduced numeric metric matching (`G5.1`), non-empty table/figure verification (`G5.2`), and Markdown dossier synthesis (`G5.3`).
+  - CLI `researchability audit --execute --dossier ...` supporting full Stage 0–5 evaluation.
 
 ### Planned
-- Milestone 4: Isolated Docker sandbox execution and output fidelity verification (`TRE-99`–`TRE-101`).
+- Milestone 5–6: Large-scale DuckDB/Parquet batch sweeps, I4R benchmark calibration, and cross-field domain overlays (`TRE-102`–`TRE-106`).
 
 ## [0.0.0] - 2026-11-14
 
