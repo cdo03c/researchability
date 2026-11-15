@@ -21,6 +21,9 @@ _CODE_EXTENSIONS = {
     ".jl",
     ".m",
     ".do",
+    ".ado",
+    ".sas",
+    ".sps",
     ".c",
     ".cpp",
     ".rs",
@@ -75,7 +78,13 @@ _HOST_RULES: list[tuple[str, str, str]] = [
     ("figshare.com", "figshare", "data"),
     ("ncbi.nlm.nih.gov", "ncbi_geo", "data"),
     ("protocols.io", "protocols_io", "protocol"),
+    ("bio-protocol.org", "protocols_io", "protocol"),
     ("aspredicted.org", "aspredicted", "prereg"),
+    ("psyarxiv.com", "psyarxiv", "other"),
+    ("openicpsr.org", "icpsr", "data"),
+    ("icpsr.umich.edu", "icpsr", "data"),
+    ("clinicaltrials.gov", "clinicaltrials", "prereg"),
+    ("scicrunch.org", "rrid", "protocol"),
 ]
 
 
@@ -97,8 +106,14 @@ def classify_url(url: str) -> tuple[str, str]:
     if "doi.org" in netloc:
         if "10.7910/dvn" in path:
             return "dataverse", "data"
+        if "10.3886/" in path:
+            return "icpsr", "data"
+        if "10.17504/protocols.io" in path:
+            return "protocols_io", "protocol"
         if "10.5281/zenodo" in path:
             return "zenodo", "data"
+        if "10.31234/osf.io" in path:
+            return "psyarxiv", "other"
         if "10.17605/osf.io" in path:
             return "osf", "data"
         return "doi", "data"

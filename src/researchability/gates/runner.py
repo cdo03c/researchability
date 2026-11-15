@@ -15,6 +15,7 @@ from researchability.gates.stage5_verification import (
     STAGE5_EVALUATORS,
     render_human_dossier,
 )
+from researchability.gates.stage_crossfield import STAGE_CROSSFIELD_EVALUATORS
 from researchability.llm.client import GeminiClient
 from researchability.models import AuditReport, FieldProfile, GateResult, PaperBundle
 from researchability.registry import GateRegistry
@@ -28,6 +29,7 @@ ALL_STAGE0_TO_3_EVALUATORS: dict[str, GateCallable] = {
     **STAGE2_EVALUATORS,
     **STAGE3_DESIGN_STATS_EVALUATORS,
     **STAGE3_INTEGRITY_EVALUATORS,
+    **STAGE_CROSSFIELD_EVALUATORS,
 }
 
 ALL_STAGE0_TO_5_EVALUATORS: dict[str, GateCallable] = {

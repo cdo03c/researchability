@@ -31,9 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Resumable batch repository sweep runner (`batch/runner.py`): rate-limited sweeps across arXiv, Harvard Dataverse, or local `PaperBundle` directories with per-paper workspace isolation and cleanup.
   - Ground-truth human calibration benchmark (`calibration/benchmark.py`): computes per-gate confusion matrices (`TP`/`FP`/`FN`/`TN`), Precision, Recall, F1, Cohen's $\kappa$, funnel depth MAE, and deterministic vs. LLM-assisted reliability rollups.
   - Upgraded CLI `researchability batch`, `researchability analytics`, and `researchability calibrate` commands.
-
-### Planned
-- Milestone 6: Cross-field domain overlays (Biomedicine, Psychology, Economics) (`TRE-104`–`TRE-106`).
+- Milestone 6 Cross-Field Extensibility Overlays (`TRE-104`):
+  - Extended `configs/gates.yaml` and `gates/stage_crossfield.py` with disciplinary overlays keeping `FieldProfile.CORE` comparable (`core_composite_score` on `AuditReport`):
+    - Biomedicine / Wet-Lab (`biomedicine_wetlab`): `G1.9_ARRIVE_CONSORT_CHECKLIST`, `G2.7_WETLAB_MATERIALS_RRID`, and `G2.8_PROTOCOL_REPOSITORY_LINK` (`protocols.io` / `10.17504/protocols.io`).
+    - Psychology / Behavioral (`psychology_social`): `G1.10_PSYCH_PAP_ADHERENCE`, OSF / PsyArXiv connector (`connectors/crossfield.py` `OsfConnector`, `psyarxiv.com`, `10.31234/osf.io`), and `researchability ingest osf`.
+    - Economics / Social Science (`economics`): `G2.9_STATA_R_PACKAGE_VALID` (`.do`/`.ado`/`.R` support + `stata` language detection), `G3.10_ECON_ROBUSTNESS_SPECIFICATION`, `IcpsrConnector` (`openicpsr.org` / `10.3886` + `researchability ingest icpsr`), and downstream `repframe` robustness manifest export (`export_repframe_manifest` & `researchability audit --repframe`).
 
 ## [0.0.0] - 2026-11-14
 

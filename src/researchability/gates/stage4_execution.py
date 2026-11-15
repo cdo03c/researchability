@@ -67,6 +67,8 @@ def _command_for_script(rel_path: str) -> list[str]:
         return ["Rscript", rel_path]
     if lower.endswith(".sh"):
         return ["bash", rel_path]
+    if lower.endswith(".do"):
+        return ["stata-mp", "-b", "do", rel_path]
     return ["python", rel_path]
 
 
@@ -90,7 +92,7 @@ def _list_workspace_scripts(workdir: Path) -> list[str]:
         rel_parts = path.relative_to(workdir).parts
         if any(part in _IGNORED_COPY_DIRS for part in rel_parts):
             continue
-        if path.is_file() and path.suffix.lower() in {".py", ".r", ".sh"}:
+        if path.is_file() and path.suffix.lower() in {".py", ".r", ".sh", ".do"}:
             scripts.append(path.relative_to(workdir).as_posix())
     return scripts
 

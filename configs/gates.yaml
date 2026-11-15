@@ -109,6 +109,26 @@ gates:
     depends_on: ["G0.1_EMPIRICAL_CLAIM"]
     weight: 0.5
 
+  - id: G1.9_ARRIVE_CONSORT_CHECKLIST
+    stage: 1
+    name: "Biomedical reporting checklist adherence (ARRIVE/CONSORT/STROBE)"
+    description: "Experimental or clinical biomedical study declares adherence to ARRIVE, CONSORT, STROBE, or PRISMA reporting standards."
+    problem_domain: transparency_reporting
+    evaluator_kind: hybrid
+    profiles: ["biomedicine_wetlab"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 1.0
+
+  - id: G1.10_PSYCH_PAP_ADHERENCE
+    stage: 1
+    name: "Preregistered hypotheses & deviations explicitly documented"
+    description: "Behavioral/social science paper links OSF/AsPredicted preregistration and clearly separates confirmatory from exploratory tests."
+    problem_domain: incentive_bias
+    evaluator_kind: hybrid
+    profiles: ["psychology_social"]
+    depends_on: ["G1.7_PREREGISTRATION_DISCLOSED"]
+    weight: 1.0
+
   # ---------------------------------------------------------------------------
   # Stage 2: Materials, Environment & Technical Variability
   # ---------------------------------------------------------------------------
@@ -180,6 +200,26 @@ gates:
     evaluator_kind: llm_assisted
     profiles: ["biomedicine_wetlab"]
     depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 1.0
+
+  - id: G2.8_PROTOCOL_REPOSITORY_LINK
+    stage: 2
+    name: "Step-by-step protocol repository link or detailed wet-lab protocol"
+    description: "Wet-lab procedures link to protocols.io/bio-protocol or provide complete reagent concentrations and step timings."
+    problem_domain: materials_variability
+    evaluator_kind: hybrid
+    profiles: ["biomedicine_wetlab"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 1.0
+
+  - id: G2.9_STATA_R_PACKAGE_VALID
+    stage: 2
+    name: "Stata/R economics replication package structured"
+    description: "Economics/social science replication package includes Stata (.do/.ado) or R scripts, README-to-table mapping, or ICPSR/Dataverse archive."
+    problem_domain: materials_variability
+    evaluator_kind: deterministic
+    profiles: ["economics"]
+    depends_on: ["G1.4_CODE_NON_STUB"]
     weight: 1.0
 
   # ---------------------------------------------------------------------------
@@ -274,6 +314,16 @@ gates:
     profiles: ["core"]
     depends_on: ["G0.1_EMPIRICAL_CLAIM"]
     weight: 1.5
+
+  - id: G3.10_ECON_ROBUSTNESS_SPECIFICATION
+    stage: 3
+    name: "Alternative specifications, placebo, and robustness checks disclosed"
+    description: "Quantitative social/behavioral study reports robustness specs (placebo, sensitivity, cluster SEs) for downstream repframe evaluation."
+    problem_domain: statistical_rigor
+    evaluator_kind: hybrid
+    profiles: ["economics", "psychology_social"]
+    depends_on: ["G3.4_EFFECT_SIZES_UNCERTAINTY"]
+    weight: 1.0
 
   # ---------------------------------------------------------------------------
   # Stage 4: Sandboxed Execution

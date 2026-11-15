@@ -21,6 +21,13 @@ researchability gates --profile bioinformatics
 # Run Stage 0–3 offline/LLM audit without container execution
 researchability audit bundle.json --workdir ./workspaces/demo -o audit_report.json -m summary.md
 
+# Audit an economics or biomedical study with a field overlay & repframe robustness manifest export
+researchability audit econ_bundle.json --workdir ./workspaces/econ --profile economics --repframe repframe.json
+
+# Ingest an OSF preregistration/PsyArXiv preprint or OpenICPSR economics archive
+researchability ingest osf https://psyarxiv.com/abcde --preprint -o psych_bundle.json
+researchability ingest icpsr 10.3886/E199999V1 -o econ_bundle.json
+
 # Run full Stage 0–5 audit with isolated Docker execution and I4R human review dossier
 researchability audit bundle.json --workdir ./workspaces/demo --execute -o audit_report.json --dossier dossier.md
 

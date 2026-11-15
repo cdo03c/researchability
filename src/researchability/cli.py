@@ -14,7 +14,13 @@ from researchability.calibration import (
     load_calibration_dataset,
     render_calibration_markdown,
 )
-from researchability.connectors import ArtifactResolver, ArxivConnector, DataverseConnector
+from researchability.connectors import (
+    ArtifactResolver,
+    ArxivConnector,
+    DataverseConnector,
+    IcpsrConnector,
+    OsfConnector,
+)
 from researchability.gates import (
     evaluate_stage0_to_3,
     evaluate_stage0_to_5_with_context,
@@ -24,7 +30,11 @@ from researchability.llm import GeminiClient
 from researchability.models import AuditReport, FieldProfile, GateResult, PaperBundle
 from researchability.registry import GateRegistry
 from researchability.sandbox import SandboxConfig
-from researchability.scoring import compute_audit_report, render_markdown_summary
+from researchability.scoring import (
+    compute_audit_report,
+    export_repframe_manifest,
+    render_markdown_summary,
+)
 from researchability.storage import ResearchabilityStore, render_analytics_markdown
 
 app = typer.Typer(
@@ -139,6 +149,58 @@ def ingest_dataverse(
         typer.echo(payload)
 
 
+@ingest_app.command("osf")
+def ingest_osf(
+    node_or_url: Annotated[
+        str,
+        typer.Argument(help="OSF node/registration ID, PsyArXiv ID, or URL."),
+    ],
+    preprint: Annotated[
+        bool,
+        typer.Option("--preprint/--project", help="Fetch from OSF preprints/PsyArXiv endpoint."),
+    ] = False,
+    profile: Annotated[
+        FieldProfile,
+        typer.Option("--profile", "-p", help="Target disciplinary profile."),
+    ] = FieldProfile.PSYCHOLOGY_SOCIAL,
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Optional output JSON path."),
+    ] = None,
+) -> None:
+    """Ingest an OSF project, preregistration, or PsyArXiv preprint into a PaperBundle."""
+    with OsfConnector() as connector:
+        bundle = connector.fetch_project(node_or_url, is_preprint=preprint, profile=profile)
+    payload = bundle.model_dump_json(indent=2)
+    if output:
+        output.write_text(payload + "\n", encoding="utf-8")
+        typer.echo(f"Wrote PaperBundle to {output}")
+    else:
+        typer.echo(payload)
+
+
+@ingest_app.command("icpsr")
+def ingest_icpsr(
+    project_or_doi: Annotated[
+        str,
+        typer.Argument(help="OpenICPSR project ID or 10.3886 DOI."),
+    ],
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Optional output JSON path."),
+    ] = None,
+) -> None:
+    """Ingest an OpenICPSR economics/social-science study into a PaperBundle."""
+    with IcpsrConnector() as connector:
+        bundle = connector.fetch_project(project_or_doi)
+    payload = bundle.model_dump_json(indent=2)
+    if output:
+        output.write_text(payload + "\n", encoding="utf-8")
+        typer.echo(f"Wrote PaperBundle to {output}")
+    else:
+        typer.echo(payload)
+
+
 @app.command()
 def score(
     bundle_path: Annotated[
@@ -207,6 +269,21 @@ def audit(
             help="Optional I4R-style human review & debate dossier Markdown path.",
         ),
     ] = None,
+    repframe: Annotated[
+        Path | None,
+        typer.Option(
+            "--repframe",
+            help="Optional downstream repframe robustness specification JSON path.",
+        ),
+    ] = None,
+    profile: Annotated[
+        FieldProfile | None,
+        typer.Option(
+            "--profile",
+            "-p",
+            help="Override bundle primary_profile with a specific disciplinary overlay.",
+        ),
+    ] = None,
     execute: Annotated[
         bool,
         typer.Option(
@@ -231,6 +308,7 @@ def audit(
     registry = GateRegistry.from_yaml(config)
     llm_client = GeminiClient() if use_llm else None
     dossier_md: str | None = None
+    robustness_spec: dict[str, object] | None = None
 
     if execute:
         report_obj, ctx = evaluate_stage0_to_5_with_context(
@@ -238,17 +316,22 @@ def audit(
             registry=registry,
             workdir=workdir,
             llm=llm_client,
+            profile=profile,
             sandbox_config=SandboxConfig(timeout_seconds=timeout),
         )
         raw_dossier = ctx.extracted_claims.get("human_dossier_markdown")
         if isinstance(raw_dossier, str):
             dossier_md = raw_dossier
+        raw_spec = ctx.extracted_claims.get("robustness_spec")
+        if isinstance(raw_spec, dict):
+            robustness_spec = raw_spec
     else:
         report_obj = evaluate_stage0_to_3(
             paper=paper,
             registry=registry,
             workdir=workdir,
             llm=llm_client,
+            profile=profile,
         )
 
     payload = report_obj.model_dump_json(indent=2)
@@ -266,6 +349,15 @@ def audit(
             encoding="utf-8",
         )
         typer.echo(f"Wrote Human Dossier to {dossier}")
+    if repframe:
+        manifest = export_repframe_manifest(
+            paper,
+            report_obj,
+            workdir=workdir,
+            robustness_spec=robustness_spec,
+        )
+        repframe.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        typer.echo(f"Wrote repframe manifest to {repframe}")
 
 
 @app.command()

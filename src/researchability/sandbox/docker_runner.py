@@ -170,9 +170,10 @@ def _iter_workspace_files(root: Path | None) -> list[Path]:
 
 
 def detect_primary_language(paper: PaperBundle, workdir: Path | None = None) -> str:
-    """Infer primary runtime language ('python', 'r', 'mixed', or 'unknown')."""
+    """Infer primary runtime language ('python', 'r', 'stata', 'mixed', or 'unknown')."""
     py_markers = 0
     r_markers = 0
+    stata_markers = 0
 
     workdir_paths = (
         [str(p.relative_to(workdir)) for p in _iter_workspace_files(workdir)]
@@ -196,13 +197,18 @@ def detect_primary_language(paper: PaperBundle, workdir: Path | None = None) -> 
             py_markers += 1
         elif lower.endswith((".r", ".rmd")) or name in {"renv.lock", "description"}:
             r_markers += 1
+        elif lower.endswith((".do", ".ado")):
+            stata_markers += 1
 
-    if py_markers > 0 and r_markers > 0:
+    active_langs = sum(1 for count in (py_markers, r_markers, stata_markers) if count > 0)
+    if active_langs > 1:
         return "mixed"
     if py_markers > 0:
         return "python"
     if r_markers > 0:
         return "r"
+    if stata_markers > 0:
+        return "stata"
     return "unknown"
 
 

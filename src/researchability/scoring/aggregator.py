@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from pathlib import Path
+from typing import Any
 
 from researchability.models import (
     AuditReport,
@@ -182,6 +184,21 @@ def compute_audit_report(
     unweighted_pass_rate = (total_passed / total_scorable) if total_scorable > 0 else None
     composite_score = (weighted_passed / weighted_total) if weighted_total > 0 else None
 
+    core_weighted_passed = 0.0
+    core_weighted_total = 0.0
+    for gate in active_gates:
+        if FieldProfile.CORE not in gate.profiles:
+            continue
+        res = resolved[gate.id]
+        if res.status == GateStatus.PASS:
+            core_weighted_passed += gate.weight
+            core_weighted_total += gate.weight
+        elif res.status == GateStatus.FAIL:
+            core_weighted_total += gate.weight
+    core_composite_score = (
+        (core_weighted_passed / core_weighted_total) if core_weighted_total > 0 else None
+    )
+
     zero_touch_res = resolved.get("G4.4_ANALYSIS_EXECUTES_ZERO_TOUCH")
     repaired_res = resolved.get("G4.5_ANALYSIS_EXECUTES_REPAIRED")
     zero_touch_reproducible = (
@@ -205,6 +222,7 @@ def compute_audit_report(
         profile=active_profile,
         funnel_depth=_compute_funnel_depth(active_gates, resolved),
         composite_score=composite_score,
+        core_composite_score=core_composite_score,
         unweighted_pass_rate=unweighted_pass_rate,
         zero_touch_reproducible=zero_touch_reproducible,
         repaired_reproducible=repaired_reproducible,
@@ -262,3 +280,39 @@ def render_markdown_summary(report: AuditReport) -> str:
         lines.append(f"- **{res.gate_id}**: `{res.status.value}`{note}")
 
     return "\n".join(lines) + "\n"
+
+
+def export_repframe_manifest(
+    paper: PaperBundle,
+    report: AuditReport,
+    *,
+    workdir: Path | None = None,
+    robustness_spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Export a downstream `repframe`-compatible robustness specification manifest."""
+    analysis_scripts = [
+        f
+        for f in paper.artifacts.code_files
+        if f.lower().endswith((".do", ".ado", ".r", ".rmd", ".py", ".sas", ".sps"))
+    ]
+    data_files = [
+        f
+        for f in paper.artifacts.data_files
+        if f.lower().endswith((".dta", ".csv", ".tsv", ".rds", ".rdata", ".sav", ".parquet"))
+    ]
+    return {
+        "schema_version": "repframe.manifest.v1",
+        "paper_id": paper.paper_id,
+        "source_repo": paper.source_repo,
+        "doi": paper.doi,
+        "profile": report.profile.value,
+        "workdir": str(workdir) if workdir is not None else None,
+        "core_composite_score": report.core_composite_score,
+        "composite_score": report.composite_score,
+        "funnel_depth": report.funnel_depth,
+        "entrypoints": analysis_scripts,
+        "datasets": data_files,
+        "artifact_urls": [link.url for link in paper.artifacts.links],
+        "robustness_flags": list(report.human_review_flags),
+        "robustness_spec": robustness_spec or {},
+    }

@@ -9,7 +9,8 @@
 - `src/researchability/scoring/aggregator.py` — Propagates dependency outcomes, calculates `funnel_depth` (`0`–`5`), domain pass rates, composite score, `zero_touch_reproducible` vs. `repaired_reproducible`, and Markdown summaries.
 - `src/researchability/profiler/` — Deterministic tabular/array data profiler and statistical forensic screeners (GRIM granularity, `p`-value consistency).
 - `src/researchability/sandbox/` — Hardened Docker execution runner (`--network=none`, CPU/RAM/timeout caps, non-root, `:ro` data mounts) and `G4.1` hardware/size preflight.
-- `src/researchability/gates/` — Staged binary-gate evaluators across Stages 0–5 (`stage0_1`, `stage2`, `stage3_design_stats`, `stage3_integrity`, `stage4_execution`, `stage5_verification`) and orchestrated `runner.py`.
+- `src/researchability/gates/` — Staged binary-gate evaluators across Stages 0–5 (`stage0_1`, `stage2`, `stage3_design_stats`, `stage3_integrity`, `stage4_execution`, `stage5_verification`, `stage_crossfield`) and orchestrated `runner.py`.
+- `src/researchability/connectors/` — Repository ingestion & link resolvers for arXiv, Harvard Dataverse, OSF/PsyArXiv (`OsfConnector`), OpenICPSR (`IcpsrConnector`), GitHub, Zenodo, and protocols.io.
 - `src/researchability/storage/` — DuckDB longitudinal warehouse, partitioned Parquet exporter (`source_repo`, `profile`, `year_part`), and funnel/trend analytical queries.
 - `src/researchability/batch/` — Resumable, rate-limited batch sweep orchestrator across arXiv, Harvard Dataverse, and bundle directories with per-paper workspace cleanup.
 - `src/researchability/calibration/` — Ground-truth human validation benchmark computing confusion matrices, F1, Cohen's $\kappa$, and evaluator-tier rollups.

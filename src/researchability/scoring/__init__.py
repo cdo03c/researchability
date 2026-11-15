@@ -2,12 +2,14 @@
 
 from researchability.scoring.aggregator import (
     compute_audit_report,
+    export_repframe_manifest,
     render_markdown_summary,
     resolve_dependency_override,
 )
 
 __all__ = [
     "compute_audit_report",
+    "export_repframe_manifest",
     "render_markdown_summary",
     "resolve_dependency_override",
 ]

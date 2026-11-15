@@ -158,4 +158,4 @@ with ArxivConnector() as arxiv, ArtifactResolver() as resolver:
 - **Milestone 3 (Complete):** Automated Stage 0–3 gate evaluators, schema profiler, and GRIM/`p`-value forensic checks.
 - **Milestone 4 (Complete):** Hardened Docker sandbox runner, separate zero-touch (`G4.4`) vs. diff-logged repair (`G4.5`) execution, Stage 5 numeric verification (`G5.1`), artifact checks (`G5.2`), and I4R-style human debate dossier synthesis (`G5.3`).
 - **Milestone 5 (Complete):** DuckDB/partitioned-Parquet longitudinal store, resumable batch sweep runner, trend analytics queries, and human ground-truth calibration benchmark.
-- **Upcoming (M6):** Cross-field overlays (Biomedicine, Psychology, Economics) and companion meta-science scripts.
+- **Milestone 6 (Complete):** Cross-field overlays (`biomedicine_wetlab`, `psychology_social`, `economics`), OSF/PsyArXiv & OpenICPSR connectors, cross-field `core_composite_score`, and downstream `repframe` export hooks.
