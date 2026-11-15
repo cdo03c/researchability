@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 import heapq
+from collections import defaultdict
+from importlib.resources import files
 from pathlib import Path
 
 import yaml
@@ -12,13 +13,16 @@ from researchability.models import FieldProfile, GateDefinition
 
 
 def default_gates_path() -> Path:
-    """Locate configs/gates.yaml relative to the repository root or package."""
+    """Locate configs/gates.yaml from the repo root, CWD, or installed wheel data."""
     repo_candidate = Path(__file__).resolve().parents[2] / "configs" / "gates.yaml"
     if repo_candidate.exists():
         return repo_candidate
     cwd_candidate = Path.cwd() / "configs" / "gates.yaml"
     if cwd_candidate.exists():
         return cwd_candidate
+    pkg_candidate = Path(str(files("researchability").joinpath("data/gates.yaml")))
+    if pkg_candidate.exists():
+        return pkg_candidate
     raise FileNotFoundError("Could not locate configs/gates.yaml")
 
 
@@ -27,7 +31,7 @@ class GateRegistryError(ValueError):
 
 
 class GateRegistry:
-    """Validated collection of gate definitions supporting profile filtering and topological order."""
+    """Validated gate collection supporting profile filtering and topological order."""
 
     def __init__(self, gates: list[GateDefinition], version: str = "1.0") -> None:
         self.version = version
@@ -69,9 +73,7 @@ class GateRegistry:
                 in_degree[gid] += 1
 
         heap: list[tuple[int, str]] = [
-            (self._gates[gid].stage, gid)
-            for gid, deg in in_degree.items()
-            if deg == 0
+            (self._gates[gid].stage, gid) for gid, deg in in_degree.items() if deg == 0
         ]
         heapq.heapify(heap)
         ordered: list[str] = []

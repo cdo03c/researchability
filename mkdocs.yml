@@ -1,0 +1,15 @@
+site_name: Researchability
+site_description: Automated staged binary-gate reproducibility and research integrity scoring engine.
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+
+nav:
+  - Overview: index.md
+  - Scoring Methodology: methodology.md
+  - Architecture: architecture.md
+  - CLI & Configuration: cli.md
+  - Contributing & Releases: contributing.md

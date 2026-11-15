@@ -14,9 +14,12 @@ build/
 .env
 .env.local
 
-# Local caches & run artifacts
+# Build / coverage / docs outputs
 .researchability_cache/
 *.sqlite
 *.db
 artifacts/
 workspaces/
+site/
+.coverage
+coverage.xml

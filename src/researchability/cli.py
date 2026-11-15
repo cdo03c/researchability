@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Optional
+from typing import Annotated
 
 import typer
 
@@ -20,23 +21,29 @@ app = typer.Typer(
 
 @app.command()
 def gates(
-    profile: FieldProfile = typer.Option(
-        FieldProfile.ML_CS,
-        "--profile",
-        "-p",
-        help="Disciplinary profile to filter active gates.",
-    ),
-    config: Optional[Path] = typer.Option(
-        None,
-        "--config",
-        "-c",
-        help="Optional path to a custom gates.yaml file.",
-    ),
+    profile: Annotated[
+        FieldProfile,
+        typer.Option(
+            "--profile",
+            "-p",
+            help="Disciplinary profile to filter active gates.",
+        ),
+    ] = FieldProfile.ML_CS,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-c",
+            help="Optional path to a custom gates.yaml file.",
+        ),
+    ] = None,
 ) -> None:
     """Validate and list binary gates active for a given disciplinary profile."""
     registry = GateRegistry.from_yaml(config)
     active = registry.gates_for_profile(profile)
-    typer.echo(f"Profile '{profile.value}' — {len(active)} active gates (registry v{registry.version}):")
+    typer.echo(
+        f"Profile '{profile.value}' — {len(active)} active gates (registry v{registry.version}):"
+    )
     for gate in active:
         deps = f" [deps: {', '.join(gate.depends_on)}]" if gate.depends_on else ""
         typer.echo(
@@ -47,14 +54,24 @@ def gates(
 
 @app.command()
 def score(
-    bundle_path: Path = typer.Argument(..., exists=True, help="Path to a PaperBundle JSON file."),
-    results_path: Path = typer.Argument(..., exists=True, help="Path to a JSON list of GateResult objects."),
-    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Optional AuditReport JSON output path."),
-    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Optional custom gates.yaml."),
+    bundle_path: Annotated[
+        Path,
+        typer.Argument(exists=True, help="Path to a PaperBundle JSON file."),
+    ],
+    results_path: Annotated[
+        Path,
+        typer.Argument(exists=True, help="Path to a JSON list of GateResult objects."),
+    ],
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Optional AuditReport JSON output path."),
+    ] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option("--config", "-c", help="Optional custom gates.yaml."),
+    ] = None,
 ) -> None:
     """Aggregate pre-evaluated GateResults for a PaperBundle into an AuditReport."""
-    import json
-
     paper = PaperBundle.model_validate_json(bundle_path.read_text(encoding="utf-8"))
     raw_list = json.loads(results_path.read_text(encoding="utf-8"))
     raw_map = {item["gate_id"]: GateResult.model_validate(item) for item in raw_list}
@@ -70,7 +87,10 @@ def score(
 
 @app.command()
 def batch(
-    source: str = typer.Option("arxiv", "--source", help="Repository source (arxiv | dataverse)."),
+    source: Annotated[
+        str,
+        typer.Option("--source", help="Repository source (arxiv | dataverse)."),
+    ] = "arxiv",
 ) -> None:
     """Run batch repository scoring (scheduled for Milestone 5)."""
     typer.echo(f"Batch runner for source '{source}' will be implemented in Milestone 5 (TRE-102).")
@@ -79,8 +99,14 @@ def batch(
 
 @app.command()
 def report(
-    audit_path: Path = typer.Argument(..., exists=True, help="Path to an AuditReport JSON file."),
-    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Optional Markdown output path."),
+    audit_path: Annotated[
+        Path,
+        typer.Argument(exists=True, help="Path to an AuditReport JSON file."),
+    ],
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Optional Markdown output path."),
+    ] = None,
 ) -> None:
     """Render a human-readable Markdown audit summary from an AuditReport JSON file."""
     audit = AuditReport.model_validate_json(audit_path.read_text(encoding="utf-8"))

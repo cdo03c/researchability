@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-class GateStatus(str, Enum):
+class GateStatus(StrEnum):
     """Possible evaluation states for a binary reproducibility gate."""
 
     PASS = "PASS"
@@ -34,7 +34,7 @@ class GateStatus(str, Enum):
         return self in {GateStatus.PASS, GateStatus.FAIL}
 
 
-class ProblemDomain(str, Enum):
+class ProblemDomain(StrEnum):
     """Reproducibility problem taxonomy mapped across stages."""
 
     TRIAGE = "triage"
@@ -47,7 +47,7 @@ class ProblemDomain(str, Enum):
     EXECUTION_OUTPUT = "execution_output"
 
 
-class FieldProfile(str, Enum):
+class FieldProfile(StrEnum):
     """Supported disciplinary gate overlays."""
 
     CORE = "core"
@@ -58,7 +58,7 @@ class FieldProfile(str, Enum):
     ECONOMICS = "economics"
 
 
-class EvaluatorKind(str, Enum):
+class EvaluatorKind(StrEnum):
     """Indicates how a gate is evaluated for provenance transparency."""
 
     DETERMINISTIC = "deterministic"
@@ -66,14 +66,14 @@ class EvaluatorKind(str, Enum):
     HYBRID = "hybrid"
 
 
-class DependencyMode(str, Enum):
+class DependencyMode(StrEnum):
     """How multiple upstream gate prerequisites combine."""
 
     ALL = "all"
     ANY = "any"
 
 
-class ArtifactStatus(str, Enum):
+class ArtifactStatus(StrEnum):
     """Resolution outcome for an external code or data link."""
 
     RESOLVED = "RESOLVED"
@@ -97,7 +97,10 @@ class ArtifactLink(BaseModel):
 
     url: str
     kind: str = Field(default="unknown", description="code | data | protocol | prereg | other")
-    host: str = Field(default="unknown", description="github | zenodo | dataverse | huggingface | osf | other")
+    host: str = Field(
+        default="unknown",
+        description="github | zenodo | dataverse | huggingface | osf | other",
+    )
     status: ArtifactStatus = ArtifactStatus.UNRESOLVED
     local_path: str | None = None
     size_bytes: int | None = None
@@ -117,7 +120,10 @@ class ArtifactManifest(BaseModel):
 class PaperBundle(BaseModel):
     """Normalized representation of a research paper and its associated artifacts."""
 
-    paper_id: str = Field(..., description="Canonical identifier (e.g., arxiv:2401.00001 or doi:10.7910/...).")
+    paper_id: str = Field(
+        ...,
+        description="Canonical identifier (e.g., arxiv:2401.00001 or doi:10.7910/...).",
+    )
     source_repo: str = Field(..., description="Origin repository (arxiv | dataverse | local).")
     title: str
     authors: list[str] = Field(default_factory=list)
@@ -155,7 +161,10 @@ class GateResult(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     rationale: str = ""
     evidence: list[EvidenceItem] = Field(default_factory=list)
-    flags: list[str] = Field(default_factory=list, description="Forensic or quality warnings for human review.")
+    flags: list[str] = Field(
+        default_factory=list,
+        description="Forensic or quality warnings for human review.",
+    )
     model_id: str | None = None
     prompt_version: str | None = None
 
@@ -186,11 +195,13 @@ class AuditReport(BaseModel):
     paper_id: str
     source_repo: str
     profile: FieldProfile
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     funnel_depth: int = Field(..., ge=0, le=5)
     composite_score: float | None = Field(
         default=None,
-        description="Weighted pass rate across all scorable gates (0.0-1.0), or None if none scorable.",
+        description=(
+            "Weighted pass rate across all scorable gates (0.0-1.0), or None if none scorable."
+        ),
     )
     unweighted_pass_rate: float | None = None
     zero_touch_reproducible: bool | None = None

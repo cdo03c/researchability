@@ -40,7 +40,10 @@ def _resolve_dependency_override(
         if any(res.status == GateStatus.PASS for res in upstream):
             return None
         blocked = [res for res in upstream if res.status.is_blocked]
-        if blocked and all(res.status.is_blocked or res.status == GateStatus.N_A for res in upstream):
+        all_blocked_or_na = all(
+            res.status.is_blocked or res.status == GateStatus.N_A for res in upstream
+        )
+        if blocked and all_blocked_or_na:
             blocker = blocked[0]
             return GateResult(
                 gate_id=gate.id,
@@ -219,7 +222,9 @@ def compute_audit_report(
 
 def render_markdown_summary(report: AuditReport) -> str:
     """Render a concise human-readable Markdown summary from an AuditReport."""
-    score_pct = f"{report.composite_score * 100:.1f}%" if report.composite_score is not None else "N/A"
+    score_pct = (
+        f"{report.composite_score * 100:.1f}%" if report.composite_score is not None else "N/A"
+    )
     lines = [
         f"# Reproducibility Audit: {report.paper_id}",
         "",
@@ -242,7 +247,8 @@ def render_markdown_summary(report: AuditReport) -> str:
     for domain, ds in report.domain_scores.items():
         rate = f"{ds.pass_rate * 100:.1f}%" if ds.pass_rate is not None else "N/A"
         lines.append(
-            f"| `{domain.value}` | {ds.passed} | {ds.failed} | {ds.blocked} | {ds.not_applicable} | {rate} |"
+            f"| `{domain.value}` | {ds.passed} | {ds.failed} | "
+            f"{ds.blocked} | {ds.not_applicable} | {rate} |"
         )
 
     if report.human_review_flags:

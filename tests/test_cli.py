@@ -1,10 +1,18 @@
-"""Tests for the researchability CLI."""
+"""Tests for the researchability CLI and package version metadata."""
+
+from importlib.metadata import version
 
 from typer.testing import CliRunner
 
+from researchability import __version__
 from researchability.cli import app
 
 runner = CliRunner()
+
+
+def test_package_version_is_0_0_0() -> None:
+    assert __version__ == "0.0.0"
+    assert version("researchability") == "0.0.0"
 
 
 def test_cli_help_lists_subcommands() -> None:

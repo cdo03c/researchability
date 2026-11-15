@@ -2,24 +2,35 @@
 
 Automated, staged binary-gate reproducibility and research integrity scoring engine, inspired by the [Institute for Replication (I4R)](https://www.i4replication.org/).
 
-## Goals
-* Automate upfront mechanical verification—artifact discovery, reporting transparency, materials/environment checks, study design & statistical screening, data integrity forensics, sandboxed execution, and numerical output matching—so human reviewers can focus on scientific judgment and robustness.
-* Score large paper repositories (starting with **arXiv** and **Harvard Dataverse** across **ML, CS, and Bioinformatics**) to analyze empirical trends in scientific repeatability over time.
-* Support modular field overlays (`configs/gates.yaml`) for expansion to biomedicine, psychology, and economics/social sciences.
+## Features
 
-## Setup
+- **Staged Binary Gates (`configs/gates.yaml`):** Stages 0–5 covering reporting transparency, incentive biases, materials/environment variability, study design & power, statistical rigor, data integrity forensics, sandboxed execution, and numerical output fidelity.
+- **Non-Punitive Blocking Semantics:** Separates `FAIL` from `BLOCKED_HARDWARE`, `BLOCKED_ACCESS`, `BLOCKED_DATA_SIZE`, and `N/A`.
+- **Zero-Touch vs. Repaired Execution Tracking:** Distinguishes out-of-the-box execution from minor diff-logged repairs.
+- **Reproducible Gemini API Integration:** `google-genai` wrapper with strict Pydantic structured outputs, model tiering, and deterministic SQLite response caching.
+- **Cross-Field Extensibility:** Starts with `ml_cs` and `bioinformatics` (arXiv & Harvard Dataverse), with declarative profile overlays for `biomedicine_wetlab`, `psychology_social`, and `economics`.
+
+## Installation
 
 ```bash
 uv sync --extra dev
 cp .env.example .env  # Add GEMINI_API_KEY
 ```
 
-## Quick Commands
+## Quick Start
 
 ```bash
-# Inspect validated binary gates for a field profile
+# Validate and inspect active gates for a field profile
 uv run researchability gates --profile ml_cs
 
-# Run test suite
-uv run pytest
+# Run test suite and quality checks
+uv run pytest -v --cov=researchability
+uv run ruff check .
+uv run mypy src
 ```
+
+## Documentation & Changelog
+
+- Documentation lives in [`docs/`](docs/index.md) and builds with `uv sync --extra docs && uv run mkdocs build --strict`.
+- Release history is tracked in [`CHANGELOG.md`](CHANGELOG.md).
+- License: [`LICENSE`](LICENSE) (MIT).

@@ -4,10 +4,32 @@ build-backend = "hatchling.build"
 
 [project]
 name = "researchability"
-version = "0.1.0"
+version = "0.0.0"
 description = "Automated staged binary-gate reproducibility and research integrity scoring engine."
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
+authors = [
+    { name = "Cuyler O'Brien", email = "cdo03c@gmail.com" },
+]
+keywords = [
+    "reproducibility",
+    "meta-science",
+    "replication",
+    "scientific-computing",
+    "audit",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Typing :: Typed",
+]
 dependencies = [
     "google-genai>=1.0.0",
     "pydantic>=2.7.0",
@@ -18,7 +40,16 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "mypy>=1.11.0",
+    "pre-commit>=3.8.0",
     "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.6.0",
+    "types-PyYAML>=6.0.12",
+]
+docs = [
+    "mkdocs>=1.6.0",
+    "mkdocs-material>=9.5.0",
 ]
 
 [project.scripts]
@@ -27,6 +58,29 @@ researchability = "researchability.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["src/researchability"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"configs/gates.yaml" = "researchability/data/gates.yaml"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+packages = ["researchability"]
+warn_return_any = true
+warn_unused_configs = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+check_untyped_defs = true

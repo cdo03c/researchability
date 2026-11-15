@@ -6,13 +6,15 @@ import hashlib
 import os
 import sqlite3
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import Any, TypeVar
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -25,7 +27,7 @@ class GeminiApiError(RuntimeError):
     """Raised when the Gemini API request or response validation fails."""
 
 
-class ModelTier(str, Enum):
+class ModelTier(StrEnum):
     """Model tiers separating fast extraction/triage from deeper verification."""
 
     FAST = "fast"
@@ -103,8 +105,14 @@ class ResponseCache:
                 """
             )
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path)
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     @staticmethod
     def make_key(
@@ -116,7 +124,8 @@ class ResponseCache:
         system_instruction: str = "",
     ) -> tuple[str, str]:
         """Compute deterministic (cache_key, input_hash) tuple."""
-        input_hash = hashlib.sha256(f"{system_instruction}\n---\n{prompt_text}".encode("utf-8")).hexdigest()
+        payload = f"{system_instruction}\n---\n{prompt_text}".encode()
+        input_hash = hashlib.sha256(payload).hexdigest()
         composite = "|".join([paper_id, gate_id, prompt_version, model_id, input_hash])
         cache_key = hashlib.sha256(composite.encode("utf-8")).hexdigest()
         return cache_key, input_hash
@@ -177,10 +186,10 @@ class GeminiClient:
         self.config = config or GeminiConfig.from_env()
         self.cache = ResponseCache(self.config.cache_path)
         self._transport = transport
-        self._sdk_client = None
+        self._sdk_client: Any = None
         self._last_request_ts = 0.0
 
-    def _get_sdk_client(self):
+    def _get_sdk_client(self) -> Any:
         if self._sdk_client is not None:
             return self._sdk_client
         if not self.config.api_key or self.config.api_key == "your_gemini_api_key_here":
@@ -219,7 +228,7 @@ class GeminiClient:
             raise GeminiApiError(f"Gemini API call failed for model {model_id}: {exc}") from exc
 
         text = getattr(response, "text", None)
-        if not text:
+        if not isinstance(text, str) or not text:
             raise GeminiApiError(f"Gemini returned an empty response for model {model_id}")
         return text
 
