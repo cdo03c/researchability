@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security & Hardening
+- Hardened sandbox, storage, extraction, and network boundaries:
+  - Disabled execution of arbitrary repository `Dockerfile`s by default (`SandboxConfig.allow_repo_dockerfile = False`) and added `--pids-limit=256`, `--ipc=none`, `--ulimit=nofile=1024:1024`, shell-escaped `shlex.quote` manifest paths, and streamed capped subprocess capture (`default_subprocess_runner`).
+  - Added path-traversal / symlink containment (`safe_resolve_under`) and TarSlip/gzip-bomb/streaming byte-cap protections across LaTeX archive extraction, Dataverse file downloads, and Stage 4 script resolution.
+  - Enforced strict domain/SSRF validation (`_hostname_matches`, `is_safe_public_url` with optional DNS resolution and per-hop `3xx` redirect checking via `UnsafeUrlError` / `create_safe_http_client`) across connectors, artifact resolution, and registry/preregistration HTTP checks.
+  - Switched DuckDB connection/schema management to versioned migrations (`schema_version = 2`), parameterized `analytics` queries, and atomic staging swaps for Hive-partitioned Parquet exports.
+
+### Fixed & Improved
+- Fixed Stage 4–5 pipeline correctness bugs: deterministic zero-touch vs. repaired sandbox sub-workspace ordering, AST-safe Python multi-seed header injection (`__future__` / module docstring ordering), exact denominator handling in `audit_model_specifications`, case-insensitive PII header detection (`PII_LEAK_DETECTED`), explicit `domain_scores` propagation through calibration/reporting, and normalized SQLite cache keys + WAL mode in `GeminiClient`.
+- Expanded manifest/environment resilience (`environment.yml`, `uv.lock`, `poetry.lock`, `Pipfile`), added bounded `RetryTransport` HTTP retries (`429`/`502`/`503`/`504` + `Retry-After`), wired optional dossier persistence in `BatchSweepRunner`, added structured CLI logging (`--verbose` / `RESEARCHABILITY_LOG_LEVEL`), and exposed `--profile` and `--timeout` on `researchability calibrate`.
+
 ### Added
 - Milestone 2 repository connectors (`TRE-92`, `TRE-93`, `TRE-94`):
   - `ArxivConnector`: Atom API search, LaTeX source archive parsing (with `pypdf` PDF fallback), section/table extraction, and category-to-profile inference.

@@ -7,11 +7,11 @@ import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from researchability.connectors.base import HttpConnector
+from researchability.connectors.base import HttpConnector, UnsafeUrlError
 from researchability.connectors.links import is_safe_public_url, scan_workspace_files
 from researchability.models import ArtifactLink, ArtifactManifest, ArtifactStatus, PaperBundle
 
@@ -192,17 +192,28 @@ class ArtifactResolver(HttpConnector):
         )
 
     def _resolve_http_head(self, link: ArtifactLink) -> ArtifactLink:
-        if not is_safe_public_url(link.url):
+        if not is_safe_public_url(link.url, resolve_dns=self._owns_client):
             return link.model_copy(
                 update={
                     "status": ArtifactStatus.UNRESOLVED,
                     "metadata": {**link.metadata, "blocked_reason": "unsafe_or_private_url"},
                 }
             )
-        resp = self.client.head(link.url)
-        if resp.status_code == 405:
-            resp = self.client.get(link.url)
-        if not is_safe_public_url(str(resp.url)):
+        try:
+            resp = self.client.head(link.url)
+            if resp.status_code == 405:
+                resp = self.client.get(link.url)
+        except UnsafeUrlError:
+            return link.model_copy(
+                update={
+                    "status": ArtifactStatus.UNRESOLVED,
+                    "metadata": {**link.metadata, "blocked_reason": "unsafe_redirect_target"},
+                }
+            )
+        hops = [str(hop.url) for hop in (*resp.history, resp)]
+        if 300 <= resp.status_code < 400 and "location" in resp.headers:
+            hops.append(urljoin(str(resp.url), resp.headers["location"]))
+        if any(not is_safe_public_url(hop, resolve_dns=self._owns_client) for hop in hops):
             return link.model_copy(
                 update={
                     "status": ArtifactStatus.UNRESOLVED,
@@ -226,7 +237,7 @@ class ArtifactResolver(HttpConnector):
         workdir: Path | None = None,
     ) -> tuple[ArtifactLink, list[str], list[str], list[str], list[str]]:
         """Resolve a single ArtifactLink and inspect local repo files when cloned."""
-        if not is_safe_public_url(link.url):
+        if not is_safe_public_url(link.url, resolve_dns=self._owns_client):
             return (
                 link.model_copy(
                     update={

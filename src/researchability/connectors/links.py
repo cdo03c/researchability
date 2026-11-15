@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import socket
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -102,8 +103,25 @@ def _hostname_matches(hostname: str, domain: str) -> bool:
     return host == dom or host.endswith(f".{dom}")
 
 
-def is_safe_public_url(url: str) -> bool:
-    """Reject non-HTTP(S) schemes, localhost, internal suffixes, and private/link-local IPs."""
+def _is_public_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def is_safe_public_url(url: str, *, resolve_dns: bool = False) -> bool:
+    """Reject non-HTTP(S) schemes, localhost, internal suffixes, and private/link-local IPs.
+
+    When ``resolve_dns`` is True, resolves the hostname via ``socket.getaddrinfo`` and
+    rejects any hostname that resolves to a non-public IP address.
+    """
     try:
         parsed = urlparse(url)
     except ValueError:
@@ -120,17 +138,26 @@ def is_safe_public_url(url: str) -> bool:
     try:
         ip = ipaddress.ip_address(hostname)
     except ValueError:
+        if not resolve_dns:
+            return True
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        try:
+            infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        except OSError:
+            return True
+        for info in infos:
+            sockaddr = info[4]
+            if not sockaddr:
+                continue
+            raw_ip = str(sockaddr[0]).split("%", 1)[0]
+            try:
+                resolved_ip = ipaddress.ip_address(raw_ip)
+            except ValueError:
+                return False
+            if not _is_public_ip(resolved_ip):
+                return False
         return True
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    return not (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
+    return _is_public_ip(ip)
 
 
 def safe_resolve_under(root: Path, rel_path: str | Path) -> Path | None:

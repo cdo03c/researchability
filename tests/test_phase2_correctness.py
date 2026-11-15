@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import sqlite3
 from pathlib import Path
 
@@ -335,6 +336,6 @@ def test_hygiene_conda_and_stdlib_and_llm_cache_hardening(tmp_path: Path) -> Non
     assert calls == 1
     assert out.passed == 2
     assert not meta.from_cache
-    with sqlite3.connect(cfg.cache_path) as conn:
+    with contextlib.closing(sqlite3.connect(cfg.cache_path)) as conn:
         mode = conn.execute("PRAGMA journal_mode").fetchone()
     assert mode is not None and mode[0].lower() == "wal"

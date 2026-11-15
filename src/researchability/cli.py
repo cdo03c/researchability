@@ -206,8 +206,12 @@ def ingest_osf(
     ] = None,
 ) -> None:
     """Ingest an OSF project, preregistration, or PsyArXiv preprint into a PaperBundle."""
-    with OsfConnector() as connector:
-        bundle = connector.fetch_project(node_or_url, is_preprint=preprint, profile=profile)
+    try:
+        with OsfConnector() as connector:
+            bundle = connector.fetch_project(node_or_url, is_preprint=preprint, profile=profile)
+    except (httpx.HTTPError, ValueError, OSError) as exc:
+        typer.echo(f"Error ingesting OSF '{node_or_url}': {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     payload = bundle.model_dump_json(indent=2)
     if output:
         output.write_text(payload + "\n", encoding="utf-8")
@@ -228,8 +232,12 @@ def ingest_icpsr(
     ] = None,
 ) -> None:
     """Ingest an OpenICPSR economics/social-science study into a PaperBundle."""
-    with IcpsrConnector() as connector:
-        bundle = connector.fetch_project(project_or_doi)
+    try:
+        with IcpsrConnector() as connector:
+            bundle = connector.fetch_project(project_or_doi)
+    except (httpx.HTTPError, ValueError, OSError) as exc:
+        typer.echo(f"Error ingesting ICPSR '{project_or_doi}': {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     payload = bundle.model_dump_json(indent=2)
     if output:
         output.write_text(payload + "\n", encoding="utf-8")

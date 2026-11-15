@@ -471,9 +471,9 @@ def _extract_declared_packages(manifest_texts: dict[str, str]) -> set[str]:
 
 
 def _default_registry_http_get(url: str) -> tuple[int, str]:
-    import httpx
+    from researchability.connectors.base import create_safe_http_client
 
-    with httpx.Client(timeout=8.0, follow_redirects=True) as client:
+    with create_safe_http_client(timeout=8.0) as client:
         resp = client.get(url)
         return resp.status_code, resp.text
 

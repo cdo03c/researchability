@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import io
 import json
+import socket
 import sys
 import tarfile
 from pathlib import Path
@@ -13,6 +14,7 @@ import httpx
 import pytest
 
 from researchability.connectors.arxiv import _extract_latex_from_bytes
+from researchability.connectors.base import RetryTransport, UnsafeUrlError, create_safe_http_client
 from researchability.connectors.dataverse import DataverseConnector
 from researchability.connectors.links import (
     classify_url,
@@ -289,3 +291,70 @@ def test_atomic_parquet_export_preserves_prior_on_failure(tmp_path: Path) -> Non
     # Prior parquet export directory and marker were preserved atomically
     assert existing_marker.exists()
     assert not any(p.name.startswith(".staging_") for p in parquet_root.iterdir())
+
+
+def test_is_safe_public_url_blocks_private_dns_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_getaddrinfo(
+        host: str,
+        port: object,
+        family: int = 0,
+        type: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[tuple[object, ...]]:
+        if host == "rebind.example.org":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))]
+        if host == "public.example.org":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+        raise socket.gaierror("unresolvable")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    assert is_safe_public_url("https://rebind.example.org/data", resolve_dns=True) is False
+    assert is_safe_public_url("https://public.example.org/data", resolve_dns=True) is True
+
+
+def test_resolver_and_transport_block_unsafe_redirect_hops(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 1. Resolver inspects redirect history and blocks internal redirect targets
+    def redirect_handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://public.example.org/start":
+            return httpx.Response(
+                302,
+                headers={"Location": "http://169.254.169.254/latest/meta-data/"},
+            )
+        return httpx.Response(200, text="secret")
+
+    client = httpx.Client(transport=httpx.MockTransport(redirect_handler), follow_redirects=True)
+    resolver = ArtifactResolver(http_client=client)
+    link = ArtifactLink(url="https://public.example.org/start", host="other")
+    resolved, *_ = resolver.resolve_link(link)
+    assert resolved.status == ArtifactStatus.UNRESOLVED
+    assert resolved.metadata.get("blocked_reason") == "unsafe_redirect_target"
+
+    # 2. RetryTransport with enforce_public_urls aborts before invoking inner transport on bad hop
+    calls: list[str] = []
+
+    def inner_handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(302, headers={"Location": "http://10.0.0.1/internal"})
+
+    safe_transport = RetryTransport(
+        httpx.MockTransport(inner_handler),
+        max_retries=0,
+        enforce_public_urls=True,
+        resolve_dns=False,
+    )
+    with (
+        httpx.Client(transport=safe_transport, follow_redirects=True) as guarded_client,
+        pytest.raises(UnsafeUrlError),
+    ):
+        guarded_client.get("https://public.example.org/jump")
+    assert calls == ["https://public.example.org/jump"]
+
+    # 3. create_safe_http_client rejects private DNS before socket connection
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_a, **_kw: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 80))],
+    )
+    with create_safe_http_client(timeout=2.0) as safe_client, pytest.raises(UnsafeUrlError):
+        safe_client.get("https://evil-alias.example.org/secret")

@@ -77,7 +77,7 @@ All **38 binary gates** defined in `configs/gates.yaml` (31 core gates evaluated
 | `G3.9_NUMERIC_CONSISTENCY` | 3 | `data_integrity` | `core` | `deterministic` | **Forensic numeric & table consistency.** Runs `statcheck` (`t`, `z`, `chi2` vs reported `p`), paired-mean `GRIM` granularity checks, regression `coef*** (se)` significance-star vs normal `|coef/se|` checks, confidence-interval bound/containment checks (`check_table_stars_and_cis`), and `d`/`r`/`R^2`/SD range checks (`check_effect_size_bounds`). |
 | `G3.10_ECON_ROBUSTNESS_SPECIFICATION` | 3 | `statistical_rigor` | `economics`, `psychology_social` | `hybrid` | **Robustness & code-vs-paper specifications.** Detects robustness methods (`placebo test`, `falsification`, `cluster standard errors`, `fixed effects`, `event study`, `diff-in-diff`, `IV`, `specification curve`), checks regression weights/clustering/splits/date bounds via `audit_model_specifications`, and records a `repframe`-ready spec. |
 | `G4.1_SANDBOX_FEASIBLE` | 4 | `execution_output` | `core` | `deterministic` | **Sandbox preflight & distributional fallback.** Checks local/remote dataset sizes (`max_data_bytes`) and hard GPU markers; when blocked by size/hardware and subsampled arrays are supplied, runs `compare_distributions` (two-sample KS + 20/40/60/80th quantile comparison). |
-| `G4.2_ENV_BUILDS` | 4 | `execution_output` | `core` | `deterministic` | **Container image builds.** Builds an isolated non-root (`65534:65534`) Docker image from the repo's `Dockerfile` or a generated `python:3.11-slim` / `rocker/r-ver:4.4.1` Dockerfile from `requirements.txt`/`pyproject.toml`/`renv.lock`. |
+| `G4.2_ENV_BUILDS` | 4 | `execution_output` | `core` | `deterministic` | **Container image builds.** Builds an isolated non-root (`65534:65534`) Docker image using a generated `python:3.11-slim` / `rocker/r-ver:4.4.1` Dockerfile from `requirements.txt`, `pyproject.toml`, `environment.yml`, `uv.lock`, `poetry.lock`, `Pipfile`, or `renv.lock` (untrusted repository `Dockerfile`s are ignored by default unless `SandboxConfig(allow_repo_dockerfile=True)` is explicitly set). |
 | `G4.3_PREP_EXECUTES` | 4 | `execution_output` | `core` | `deterministic` | **Data-prep pipeline runs.** Executes discovered data-preparation scripts inside the offline (`--network=none`, `--cap-drop=ALL`, resource-capped, `/data:ro`) Docker container and verifies exit code `0`. |
 | `G4.4_ANALYSIS_EXECUTES_ZERO_TOUCH` | 4 | `execution_output` | `core` | `deterministic` | **Main analysis runs zero-touch (+ optional multi-seed sweep).** Discovers the main entrypoint, runs the unmodified repo in Docker (`exit 0`), and optionally executes alternate `PYTHONHASHSEED`/`RESEARCHABILITY_SEED` passes (`run_multiseed_check=True` or `multiseed_values`). |
 | `G4.5_ANALYSIS_EXECUTES_REPAIRED` | 4 | `execution_output` | `core` | `hybrid` | **Main analysis runs after logged repair.** Marked `N/A` if `G4.4` passed; otherwise applies bounded mechanical patches (hardcoded local paths, missing directory creation, missing local file copies, optional `--use-llm` `REASONING` minimal diff ≤20 lines), logs unified diffs, and re-runs in Docker (plus optional multi-seed sweep). |
@@ -171,11 +171,11 @@ uv run researchability batch --source arxiv -C cs.LG -C q-bio.QM --limit 50 \
   --markdown results/analytics.md
 ```
 
-Query longitudinal funnel drop-off rates and temporal trends from an existing warehouse, or calibrate gate precision/recall/Cohen's $\kappa$ against human labels:
+Query longitudinal funnel drop-off rates and temporal trends from an existing warehouse (`schema_version = 2` with automatic migrations), or calibrate gate precision/recall/Cohen's $\kappa$ against human labels (pass `--verbose` / `-v` before any command for INFO logging, or `--profile` and `--timeout` on `calibrate` when evaluating Stage 4–5 execution):
 
 ```bash
-uv run researchability analytics --db results/researchability.duckdb -m results/analytics.md
-uv run researchability calibrate ground_truth.jsonl -o cal.json -m cal.md
+uv run researchability --verbose analytics --db results/researchability.duckdb -m results/analytics.md
+uv run researchability calibrate ground_truth.jsonl --profile economics --timeout 300 -o cal.json -m cal.md
 ```
 
 ### 6. Using Researchability from Python

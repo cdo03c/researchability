@@ -9,8 +9,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import httpx
 from pydantic import BaseModel, Field
+
+from researchability.connectors.base import create_safe_http_client
 
 if TYPE_CHECKING:
     from researchability.profiler.data_profiler import DataFileProfile
@@ -58,7 +59,7 @@ class QuantitativeRobustnessResult(BaseModel):
 
 
 def _default_http_get(url: str) -> tuple[int, str]:
-    with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+    with create_safe_http_client(timeout=10.0) as client:
         resp = client.get(url)
         return resp.status_code, resp.text
 
