@@ -8,6 +8,7 @@ Automated, staged binary-gate reproducibility and research integrity scoring eng
 ## Features
 
 - **Staged Binary Gates (`configs/gates.yaml`):** Stages 0–5 covering reporting transparency, incentive biases, materials/environment variability, study design & power, statistical rigor, data integrity forensics, sandboxed execution, and numerical output fidelity.
+- **I4R-Derived Hygiene & Forensic Screeners:** Static README-to-repo inventory diffs, duplicate/output-collision detection, dependency manifest & opt-in PyPI/CRAN liveness checks, public PII and sentinel missing-code scans, regression star/CI/GRIM/effect-bound forensics, and post-run convergence & effective-`N` log auditing.
 - **Non-Punitive Blocking Semantics:** Separates `FAIL` from `BLOCKED_HARDWARE`, `BLOCKED_ACCESS`, `BLOCKED_DATA_SIZE`, and `N/A`.
 - **Zero-Touch vs. Repaired Execution Tracking:** Distinguishes out-of-the-box execution from minor diff-logged repairs.
 - **Reproducible Gemini API Integration:** `google-genai` wrapper with strict Pydantic structured outputs, model tiering, and deterministic SQLite response caching.

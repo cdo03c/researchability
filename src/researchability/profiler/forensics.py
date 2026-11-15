@@ -27,6 +27,29 @@ _CHI2_TEST_RE = re.compile(
     r"\b(?:chi2|χ2|x2)\s*\(\s*(\d+(?:\.\d+)?)\s*\)\s*=\s*(\d+(?:\.\d+)?)\s*,\s*p\s*([<=>]+)\s*(\d*\.?\d+)",
     re.IGNORECASE,
 )
+_REG_STAR_ENTRY_RE = re.compile(r"(-?\d+\.\d+)\s*(\*{1,3})\s*\(\s*(\d+\.\d+)\s*\)")
+_REG_UNSTARRED_ENTRY_RE = re.compile(r"(?:^|\s)(-?\d+\.\d+)\s+\(\s*(\d+\.\d+)\s*\)(?!\s*\*)")
+_LABELED_CI_RE = re.compile(
+    r"\b(?:b|beta|OR|HR|RR|ATT|ATE|estimate|coef(?:ficient)?|effect)\s*=\s*(-?\d+\.\d+)\s*"
+    r"(?!%)[,;(]*\s*(?:9[059]%\s*)?CIs?\s*[:=]?\s*"
+    r"\[\s*(-?\d+\.\d+)\s*[,;\u2013-]+\s*(-?\d+\.\d+)\s*\]",
+    re.IGNORECASE,
+)
+_CI_PAIR_RE = re.compile(
+    r"\b(?:9[059]%\s*)?CIs?\s*[:=]?\s*\[\s*(-?\d+\.\d+)\s*[,;]+\s*(-?\d+\.\d+)\s*\]",
+    re.IGNORECASE,
+)
+_COHEN_D_RE = re.compile(r"\bCohen(?:'s)?\s*d\s*=\s*(-?\d+(?:\.\d+)?)\b", re.IGNORECASE)
+_PEARSON_R_RE = re.compile(r"\bPearson(?:'s)?\s*r\s*=\s*(-?\d+(?:\.\d+)?)\b", re.IGNORECASE)
+_NEG_SPREAD_RE = re.compile(
+    r"\b(?:SD|SE|standard\s+error|variance)\s*=\s*(-\d+(?:\.\d+)?)\b", re.IGNORECASE
+)
+_R2_RE = re.compile(r"(?:R\^2|R²)\s*=\s*(-?\d+(?:\.\d+)?)\b")
+_BAD_P_RE = re.compile(r"\bp\s*=\s*(-?\d+(?:\.\d+)?)\b", re.IGNORECASE)
+_GRIM_MEAN_N_RE = re.compile(
+    r"\b(?:M|mean)\s*=\s*(\d+\.\d{1,3})\s*[,;(]\s*[Nn]\s*=\s*(\d{1,3})\b",
+    re.IGNORECASE,
+)
 
 
 class GrimResult(BaseModel):
@@ -323,9 +346,104 @@ def check_stat_consistency(text: str) -> list[StatcheckResult]:
     return results
 
 
+def check_table_stars_and_cis(text: str) -> list[str]:
+    """Audit regression table significance stars vs. coef/SE ratios and CI bounds."""
+    flags: list[str] = []
+    star_matches = list(_REG_STAR_ENTRY_RE.finditer(text))
+    for match in star_matches:
+        coef = float(match.group(1))
+        stars = match.group(2)
+        se = float(match.group(3))
+        if se <= 0:
+            continue
+        p_val = two_tailed_z_p(abs(coef) / se)
+        if len(stars) == 3 and p_val > 0.06:
+            flags.append(
+                f"Significance star mismatch on '{match.group(0)}' (implied p={p_val:.4f} > 0.05)"
+            )
+        elif len(stars) == 2 and p_val > 0.10:
+            flags.append(
+                f"Significance star mismatch on '{match.group(0)}' (implied p={p_val:.4f} > 0.10)"
+            )
+        elif len(stars) == 1 and p_val > 0.15:
+            flags.append(
+                f"Significance star mismatch on '{match.group(0)}' (implied p={p_val:.4f} > 0.15)"
+            )
+
+    if len(star_matches) >= 2:
+        for match in _REG_UNSTARRED_ENTRY_RE.finditer(text):
+            coef = float(match.group(1))
+            se = float(match.group(2))
+            if se <= 0:
+                continue
+            p_val = two_tailed_z_p(abs(coef) / se)
+            if p_val < 0.0005:
+                flags.append(
+                    f"Missing significance stars on '{match.group(0).strip()}' "
+                    f"(implied p={p_val:.5f} < 0.001 in starred table)"
+                )
+
+    for match in _CI_PAIR_RE.finditer(text):
+        lo = float(match.group(1))
+        hi = float(match.group(2))
+        if lo > hi:
+            flags.append(f"Inverted confidence interval bounds in '{match.group(0)}' ({lo} > {hi})")
+
+    for match in _LABELED_CI_RE.finditer(text):
+        est = float(match.group(1))
+        lo = float(match.group(2))
+        hi = float(match.group(3))
+        if lo <= hi and not (lo - 1e-6 <= est <= hi + 1e-6):
+            flags.append(
+                f"Confidence interval mismatch on '{match.group(0)}': "
+                f"estimate {est} outside [{lo}, {hi}]"
+            )
+
+    return flags
+
+
+def check_effect_size_bounds(text: str) -> list[str]:
+    """Flag implausible effect sizes, out-of-range correlations/R^2, or negative variances."""
+    flags: list[str] = []
+    for match in _COHEN_D_RE.finditer(text):
+        d_val = float(match.group(1))
+        if abs(d_val) > 3.0:
+            flags.append(
+                f"Implausibly large standardized effect size '{match.group(0)}' (|d| > 3.0)"
+            )
+    for match in _PEARSON_R_RE.finditer(text):
+        r_val = float(match.group(1))
+        if abs(r_val) > 1.0:
+            flags.append(f"Out-of-range correlation '{match.group(0)}' (|r| > 1.0)")
+    for match in _NEG_SPREAD_RE.finditer(text):
+        flags.append(f"Negative spread/variance reported in '{match.group(0)}'")
+    for match in _R2_RE.finditer(text):
+        r2_val = float(match.group(1))
+        if r2_val < 0.0 or r2_val > 1.0:
+            flags.append(f"Out-of-range R^2 in '{match.group(0)}'")
+    for match in _BAD_P_RE.finditer(text):
+        p_val = float(match.group(1))
+        if p_val < 0.0 or p_val > 1.0:
+            flags.append(f"Impossible p-value outside [0, 1] in '{match.group(0)}'")
+    return flags
+
+
+def extract_paired_grim_checks(text: str) -> list[GrimResult]:
+    """Run GRIM checks on explicit `mean = X.XX, N = YY` pairs within granularity bounds."""
+    results: list[GrimResult] = []
+    for match in _GRIM_MEAN_N_RE.finditer(text):
+        mean_str = match.group(1)
+        n_val = int(match.group(2))
+        decimals = len(mean_str.split(".")[1])
+        if 1 <= n_val <= 10**decimals:
+            results.append(check_grim(mean_str, n_val))
+    return results
+
+
 def run_forensic_checks(text: str) -> ForensicSummary:
     """Run automated numeric consistency checks on paper text."""
     stat_results = check_stat_consistency(text)
+    grim_results = extract_paired_grim_checks(text)
     flags: list[str] = []
     for item in stat_results:
         if not item.consistent:
@@ -333,4 +451,13 @@ def run_forensic_checks(text: str) -> ForensicSummary:
             flags.append(
                 f"Statistical {kind} in '{item.raw_match}' (computed p={item.computed_p:.4f})"
             )
-    return ForensicSummary(statcheck_results=stat_results, flags=flags)
+    for grim in grim_results:
+        if not grim.consistent and grim.reason:
+            flags.append(f"GRIM inconsistency: {grim.reason}")
+    flags.extend(check_table_stars_and_cis(text))
+    flags.extend(check_effect_size_bounds(text))
+    return ForensicSummary(
+        grim_results=grim_results,
+        statcheck_results=stat_results,
+        flags=flags,
+    )

@@ -118,6 +118,9 @@ def evaluate_stage0_to_5_with_context(
             repair_diffs=ctx.extracted_claims.get("repair_diffs"),
             regenerated_artifacts=ctx.extracted_claims.get("regenerated_artifacts"),
             robustness_checks=ctx.extracted_claims.get("suggested_robustness_checks"),
+            hygiene_audit=ctx.extracted_claims.get("hygiene_audit"),
+            dependency_audit=ctx.extracted_claims.get("dependency_audit"),
+            execution_log_audit=ctx.extracted_claims.get("execution_log_audit"),
         )
 
     return report, ctx

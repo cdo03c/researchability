@@ -20,6 +20,7 @@ from researchability.models import (
     GateStatus,
     PaperBundle,
 )
+from researchability.profiler.forensics import extract_claimed_sample_sizes
 from researchability.sandbox import SandboxRunResult
 
 _LABELED_METRIC_RE = re.compile(
@@ -69,6 +70,41 @@ class NumericComparison(BaseModel):
     matched: bool
     reported_source: str
     reproduced_source: str
+
+
+class ExecutionLogAudit(BaseModel):
+    """Post-run diagnostics extracted from stdout/stderr and generated logs/tables."""
+
+    convergence_warnings: list[str] = Field(default_factory=list)
+    dropped_singletons: list[str] = Field(default_factory=list)
+    observed_nobs: list[int] = Field(default_factory=list)
+    claimed_n: list[int] = Field(default_factory=list)
+    effective_n_mismatches: list[str] = Field(default_factory=list)
+    flags: list[str] = Field(default_factory=list)
+
+
+_CONVERGENCE_WARNING_RE = re.compile(
+    r"(?:did not converge|convergence not achieved|failed to converge|"
+    r"maximum (?:number of )?iterations exceeded|"
+    r"(?:boundary \(singular\) fit|singular fit|is singular)|"
+    r"non-positive-definite|rank-deficient|"
+    r"\d+\s+divergent transitions|"
+    r"(?:quasi-)?complete separation)",
+    re.IGNORECASE,
+)
+_RHAT_HIGH_RE = re.compile(r"\bR[-_]?hat\s*(?:=|>|>=|:)\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
+_DROPPED_SINGLETON_RE = re.compile(
+    r"(?:dropped\s+([\d,]+)\s+singleton(?:s|\s+observations?)?|"
+    r"([\d,]+)\s+singleton(?:\s+observations?)?\s+(?:were\s+)?dropped|"
+    r"note:\s+([\d,]+)\s+singleton)",
+    re.IGNORECASE,
+)
+_OBS_N_RE = re.compile(
+    r"(?:Number of obs|No\.\s*Observations|Num\.\s*obs\.|Observations|N_obs|nobs)"
+    r"\s*(?:=|:|\|)?\s*([\d,]{1,12})\b",
+    re.IGNORECASE,
+)
+_JSON_NOBS_RE = re.compile(r'"(?:nobs|num_obs|observations|n_obs)"\s*:\s*(\d+)\b', re.IGNORECASE)
 
 
 class _LLMNumericList(BaseModel):
@@ -356,6 +392,133 @@ def compare_numeric_outcomes(
     return comparisons
 
 
+def _collect_output_texts(
+    run_res: SandboxRunResult,
+    analysis_workdir: Path | None,
+) -> dict[str, str]:
+    texts: dict[str, str] = {}
+    candidate_files = list(dict.fromkeys([*run_res.created_files, *run_res.modified_files]))
+    for rel in candidate_files:
+        text = run_res.output_previews.get(rel)
+        if text is None and analysis_workdir is not None:
+            path = analysis_workdir / rel
+            if path.is_file() and path.suffix.lower() in {
+                ".json",
+                ".csv",
+                ".tsv",
+                ".txt",
+                ".log",
+                ".tex",
+                ".md",
+                ".html",
+            }:
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")[:30_000]
+                except OSError:
+                    text = None
+        if text:
+            texts[rel] = text
+    return texts
+
+
+def audit_execution_logs(
+    run_res: SandboxRunResult,
+    output_texts: dict[str, str],
+    claimed_ns: list[int],
+) -> ExecutionLogAudit:
+    """Scan post-run stdout/stderr and generated log/table outputs for estimation warnings."""
+    streams: list[tuple[str, str]] = []
+    if run_res.command_result.stdout:
+        streams.append(("stdout", run_res.command_result.stdout))
+    if run_res.command_result.stderr:
+        streams.append(("stderr", run_res.command_result.stderr))
+    for rel, body in output_texts.items():
+        streams.append((rel, body))
+
+    convergence_warnings: list[str] = []
+    dropped_singletons: list[str] = []
+    observed_nobs: list[int] = []
+    seen_conv: set[str] = set()
+    seen_sing: set[str] = set()
+    seen_nobs: set[int] = set()
+
+    for source, text in streams:
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            conv_m = _CONVERGENCE_WARNING_RE.search(stripped)
+            if conv_m:
+                msg = f"{source}: {stripped[:160]}"
+                if msg not in seen_conv:
+                    seen_conv.add(msg)
+                    convergence_warnings.append(msg)
+            rhat_m = _RHAT_HIGH_RE.search(stripped)
+            if rhat_m:
+                try:
+                    if float(rhat_m.group(1)) > 1.05:
+                        msg = f"{source}: high R-hat ({rhat_m.group(0)})"
+                        if msg not in seen_conv:
+                            seen_conv.add(msg)
+                            convergence_warnings.append(msg)
+                except ValueError:
+                    pass
+            sing_m = _DROPPED_SINGLETON_RE.search(stripped)
+            if sing_m:
+                count_str = next((g for g in sing_m.groups() if g), "")
+                msg = f"{source}: {stripped[:160]} ({count_str} singletons)"
+                if msg not in seen_sing:
+                    seen_sing.add(msg)
+                    dropped_singletons.append(msg)
+
+            for obs_m in _OBS_N_RE.finditer(stripped):
+                try:
+                    n_val = int(obs_m.group(1).replace(",", ""))
+                except ValueError:
+                    continue
+                if n_val >= 5 and n_val not in seen_nobs:
+                    seen_nobs.add(n_val)
+                    observed_nobs.append(n_val)
+
+        if source.lower().endswith(".json"):
+            for json_m in _JSON_NOBS_RE.finditer(text):
+                try:
+                    n_val = int(json_m.group(1))
+                except ValueError:
+                    continue
+                if n_val >= 5 and n_val not in seen_nobs:
+                    seen_nobs.add(n_val)
+                    observed_nobs.append(n_val)
+
+    mismatches: list[str] = []
+    if observed_nobs and claimed_ns:
+        for obs_n in observed_nobs:
+            close_to_claim = any(
+                abs(obs_n - claim) <= max(2, int(0.05 * claim)) for claim in claimed_ns
+            )
+            if not close_to_claim:
+                mismatches.append(
+                    f"Model observed N={obs_n} diverges from claimed manuscript N={claimed_ns}"
+                )
+
+    flags: list[str] = []
+    for warn in convergence_warnings[:5]:
+        flags.append(f"CONVERGENCE_WARNING: {warn}")
+    for sing in dropped_singletons[:5]:
+        flags.append(f"DROPPED_SINGLETONS: {sing}")
+    for mm in mismatches[:5]:
+        flags.append(f"EFFECTIVE_N_MISMATCH: {mm}")
+
+    return ExecutionLogAudit(
+        convergence_warnings=convergence_warnings,
+        dropped_singletons=dropped_singletons,
+        observed_nobs=observed_nobs,
+        claimed_n=list(claimed_ns),
+        effective_n_mismatches=mismatches,
+        flags=flags,
+    )
+
+
 def eval_g5_1_numeric_outcomes_match(ctx: EvaluationContext) -> GateResult:
     """Verify executed script outputs match reported numeric outcomes (G5.1)."""
     run_res: SandboxRunResult | None = ctx.extracted_claims.get("analysis_run_effective")
@@ -370,6 +533,13 @@ def eval_g5_1_numeric_outcomes_match(ctx: EvaluationContext) -> GateResult:
     reported = _extract_reported_claims(ctx)
     reproduced = _extract_reproduced_metrics(run_res, analysis_workdir)
 
+    claimed_ns: list[int] = ctx.extracted_claims.get("claimed_n") or extract_claimed_sample_sizes(
+        ctx.manuscript_snippet()
+    )
+    output_texts = _collect_output_texts(run_res, analysis_workdir)
+    log_audit = audit_execution_logs(run_res, output_texts, claimed_ns)
+    ctx.extracted_claims["execution_log_audit"] = log_audit
+
     abs_tol = float(ctx.extracted_claims.get("numeric_abs_tol", _DEFAULT_ABS_TOL))
     rel_tol = float(ctx.extracted_claims.get("numeric_rel_tol", _DEFAULT_REL_TOL))
     comparisons = compare_numeric_outcomes(reported, reproduced, abs_tol=abs_tol, rel_tol=rel_tol)
@@ -383,7 +553,7 @@ def eval_g5_1_numeric_outcomes_match(ctx: EvaluationContext) -> GateResult:
                 f"Could not match numeric claims between paper ({len(reported)} extracted) "
                 f"and sandbox outputs ({len(reproduced)} extracted)."
             ),
-            flags=["NO_VERIFIABLE_NUMERIC_METRICS"],
+            flags=["NO_VERIFIABLE_NUMERIC_METRICS", *log_audit.flags],
         )
 
     mismatches = [c for c in comparisons if not c.matched]
@@ -396,6 +566,10 @@ def eval_g5_1_numeric_outcomes_match(ctx: EvaluationContext) -> GateResult:
         for c in comparisons
     ]
     evidence = [EvidenceItem(source="numeric_diff", excerpt="; ".join(summary_rows[:6]))]
+    if log_audit.flags:
+        evidence.append(
+            EvidenceItem(source="execution_log_audit", excerpt="; ".join(log_audit.flags[:4]))
+        )
 
     if mismatches:
         mismatch_names = ", ".join(m.metric_name for m in mismatches[:5])
@@ -407,7 +581,7 @@ def eval_g5_1_numeric_outcomes_match(ctx: EvaluationContext) -> GateResult:
                 f"tolerance ({mismatch_names})."
             ),
             evidence=evidence,
-            flags=["NUMERIC_OUTCOME_MISMATCH"],
+            flags=["NUMERIC_OUTCOME_MISMATCH", *log_audit.flags],
         )
 
     return GateResult(
@@ -415,6 +589,7 @@ def eval_g5_1_numeric_outcomes_match(ctx: EvaluationContext) -> GateResult:
         status=GateStatus.PASS,
         rationale=f"All {len(comparisons)} matched numeric outcome(s) agree within tolerance.",
         evidence=evidence,
+        flags=list(log_audit.flags),
     )
 
 
@@ -517,6 +692,18 @@ def _suggest_robustness_checks(
     return list(dict.fromkeys(checks))
 
 
+def _as_dict(obj: Any) -> dict[str, Any]:
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "model_dump"):
+        dumped = obj.model_dump()
+        if isinstance(dumped, dict):
+            return dumped
+    return {}
+
+
 def render_human_dossier(
     report: AuditReport,
     *,
@@ -525,6 +712,9 @@ def render_human_dossier(
     repair_diffs: list[dict[str, str]] | None = None,
     regenerated_artifacts: list[str] | None = None,
     robustness_checks: list[str] | None = None,
+    hygiene_audit: dict[str, Any] | None = None,
+    dependency_audit: Any | None = None,
+    execution_log_audit: Any | None = None,
 ) -> str:
     """Render an I4R-style human review & debate dossier in Markdown."""
     score_pct = (
@@ -617,6 +807,45 @@ def render_human_dossier(
         for art in regenerated_artifacts:
             lines.append(f"- `{art}`")
 
+    hyg = _as_dict(hygiene_audit)
+    dep = _as_dict(dependency_audit)
+    hyg_lines: list[str] = []
+    for key, label in (
+        ("stale_references", "Stale README references"),
+        ("competing_entrypoints", "Competing/versioned entrypoints"),
+        ("divergent_duplicates", "Divergent duplicate basenames"),
+        ("output_collisions", "Output overwrite collisions"),
+        ("missing_input_references", "Missing script input references"),
+        ("hardcoded_dirs", "Hardcoded local working directories"),
+    ):
+        vals = hyg.get(key) or []
+        if vals:
+            hyg_lines.append(f"- **{label}:** {', '.join(f'`{v}`' for v in vals[:6])}")
+    for key, label in (
+        ("undeclared_packages", "Undeclared script imports"),
+        ("unpinned_remote_packages", "Unpinned remote package installs"),
+        ("archived_or_missing_packages", "Archived/missing registry packages"),
+    ):
+        vals = dep.get(key) or []
+        if vals:
+            hyg_lines.append(f"- **{label}:** {', '.join(f'`{v}`' for v in vals[:6])}")
+    if hyg_lines:
+        lines.extend(["", "## Repository & Package Hygiene Audit", "", *hyg_lines])
+
+    log_aud = _as_dict(execution_log_audit)
+    log_lines: list[str] = []
+    if log_aud.get("convergence_warnings"):
+        for w in log_aud["convergence_warnings"][:6]:
+            log_lines.append(f"- **Convergence warning:** `{w}`")
+    if log_aud.get("dropped_singletons"):
+        for s in log_aud["dropped_singletons"][:6]:
+            log_lines.append(f"- **Dropped singletons:** `{s}`")
+    if log_aud.get("effective_n_mismatches"):
+        for m in log_aud["effective_n_mismatches"][:6]:
+            log_lines.append(f"- **Effective-N mismatch:** {m}")
+    if log_lines:
+        lines.extend(["", "## Execution Log & Effective-N Audit (G5.1)", "", *log_lines])
+
     checks = robustness_checks or _suggest_robustness_checks(
         report.profile,
         report.human_review_flags,
@@ -671,6 +900,9 @@ def eval_g5_3_human_dossier_ready(ctx: EvaluationContext) -> GateResult:
             repair_diffs=repair_diffs,
             regenerated_artifacts=regenerated,
             robustness_checks=checks,
+            hygiene_audit=ctx.extracted_claims.get("hygiene_audit"),
+            dependency_audit=ctx.extracted_claims.get("dependency_audit"),
+            execution_log_audit=ctx.extracted_claims.get("execution_log_audit"),
         )
 
     return GateResult(

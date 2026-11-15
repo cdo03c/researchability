@@ -7,8 +7,10 @@ import struct
 from pathlib import Path
 
 from researchability.profiler import (
+    check_effect_size_bounds,
     check_grim,
     check_stat_consistency,
+    check_table_stars_and_cis,
     extract_claimed_sample_sizes,
     profile_data_file,
     run_forensic_checks,
@@ -77,3 +79,34 @@ def test_statcheck_catches_planted_p_value_and_decision_errors() -> None:
 def test_extract_claimed_sample_sizes() -> None:
     ns = extract_claimed_sample_sizes("We evaluated N = 1,200 patients across 300 samples.")
     assert ns == [1200, 300]
+
+
+def test_table_stars_and_ci_forensics() -> None:
+    text = (
+        "Table 2 coefficients:\n"
+        "Treat A = 0.05*** (0.20)\n"
+        "Treat B = 0.50*** (0.10)\n"
+        "Treat C = 1.20*** (0.30)\n"
+        "Treat D = 0.80 (0.15)\n"
+        "beta = 0.42, 95% CI [0.10, 0.30] and 95% CI [0.65, 0.25]."
+    )
+    flags = check_table_stars_and_cis(text)
+    assert any("Significance star mismatch" in f and "0.05***" in f for f in flags)
+    assert any("Missing significance stars" in f and "0.80" in f for f in flags)
+    assert any("Confidence interval mismatch" in f and "0.42" in f for f in flags)
+    assert any("Inverted confidence interval bounds" in f for f in flags)
+
+
+def test_effect_size_bounds_and_paired_grim_in_summary() -> None:
+    text = (
+        "Participants scored mean = 3.55, N = 10. "
+        "Treatment effect Cohen's d = 4.20, Pearson r = 1.15, R^2 = 1.08, SD = -0.35, p = 1.25."
+    )
+    bound_flags = check_effect_size_bounds(text)
+    assert len(bound_flags) == 5
+
+    summary = run_forensic_checks(text)
+    assert len(summary.grim_results) == 1
+    assert summary.grim_results[0].consistent is False
+    assert any("GRIM inconsistency" in f for f in summary.flags)
+    assert len(summary.flags) == 6
