@@ -105,6 +105,35 @@ def test_crossfield_link_classification_and_connectors() -> None:
     assert "code/master.do" in econ_bundle.artifacts.code_files
     assert detect_primary_language(econ_bundle) == "stata"
 
+    # Live-discovered edge cases: versioned PsyArXiv IDs and DataCite fallback on 403
+    with OsfConnector(http_client=osf_client) as osf:
+        versioned_bundle = osf.fetch_project("67pcn_v2", is_preprint=True)
+    assert versioned_bundle.paper_id == "osf:67pcn_v2"
+
+    def fallback_handler(request: httpx.Request) -> httpx.Response:
+        if "api.datacite.org" in str(request.url):
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "attributes": {
+                            "titles": [{"title": "DataCite Fallback Study"}],
+                            "descriptions": [{"description": "Restricted-use archive"}],
+                            "publicationYear": 2026,
+                            "rightsList": [{"rights": "Restricted access"}],
+                        }
+                    }
+                },
+            )
+        return httpx.Response(403, text="Forbidden")
+
+    fallback_client = httpx.Client(transport=httpx.MockTransport(fallback_handler))
+    with IcpsrConnector(http_client=fallback_client) as icpsr:
+        dc_bundle = icpsr.fetch_project("10.3886/E120001V1")
+    assert dc_bundle.title == "DataCite Fallback Study"
+    assert dc_bundle.published_year == 2026
+    assert dc_bundle.artifacts.links[0].status == ArtifactStatus.BLOCKED_ACCESS
+
 
 def test_biomedicine_wetlab_overlay_evaluation() -> None:
     text = (

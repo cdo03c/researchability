@@ -296,9 +296,20 @@ def _classify_remote_manifest(
             "dockerfile",
         }:
             manifest_files.append(rel)
-        if suffix in {".py", ".r", ".rmd", ".ipynb", ".sh", ".do", ".jl", ".m"}:
+        if suffix in {".py", ".r", ".rmd", ".ipynb", ".sh", ".do", ".ado", ".jl", ".m"}:
             code_files.append(rel)
-        elif suffix in {".csv", ".tsv", ".parquet", ".json", ".rds", ".dta", ".h5ad", ".xlsx"}:
+        elif suffix in {
+            ".csv",
+            ".tsv",
+            ".tab",
+            ".parquet",
+            ".json",
+            ".rds",
+            ".dta",
+            ".sav",
+            ".h5ad",
+            ".xlsx",
+        }:
             data_files.append(rel)
 
     return code_files, data_files, manifest_files, readme_files

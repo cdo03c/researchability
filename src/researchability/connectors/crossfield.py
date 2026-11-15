@@ -17,8 +17,14 @@ from researchability.models import (
     PaperBundle,
 )
 
-_OSF_NODE_RE = re.compile(r"osf\.io/(?:registrations/)?([a-z0-9]{5})", re.IGNORECASE)
-_PSYARXIV_RE = re.compile(r"(?:psyarxiv\.com|10\.31234/osf\.io)/([a-z0-9]{5})", re.IGNORECASE)
+_OSF_NODE_RE = re.compile(
+    r"osf\.io/(?:registrations/|preprints/(?:[a-z]+/)?)?([a-z0-9]{5}(?:_v\d+)?)",
+    re.IGNORECASE,
+)
+_PSYARXIV_RE = re.compile(
+    r"(?:psyarxiv\.com|10\.31234/osf\.io)/([a-z0-9]{5}(?:_v\d+)?)",
+    re.IGNORECASE,
+)
 _ICPSR_ID_RE = re.compile(
     r"(?:10\.3886/(?:E|ICPSR)?(\d+)|(?:open)?icpsr[^0-9]*(\d+))",
     re.IGNORECASE,
@@ -30,7 +36,7 @@ def _extract_osf_node_id(identifier: str) -> str:
     m = _PSYARXIV_RE.search(cleaned) or _OSF_NODE_RE.search(cleaned)
     if m:
         return m.group(1).lower()
-    if re.fullmatch(r"[a-z0-9]{5}", cleaned, re.IGNORECASE):
+    if re.fullmatch(r"[a-z0-9]{5}(?:_v\d+)?", cleaned, re.IGNORECASE):
         return cleaned.lower()
     msg = f"Cannot parse OSF/PsyArXiv node ID from '{identifier}'."
     raise ValueError(msg)
@@ -133,42 +139,82 @@ class IcpsrConnector(HttpConnector):
         super().__init__(http_client=http_client, timeout=timeout)
         self.base_url = base_url.rstrip("/")
 
+    def _fetch_datacite_fallback(self, project_id: str) -> dict[str, Any] | None:
+        """Query DataCite DOI API when OpenICPSR web endpoints block automated requests."""
+        for candidate_doi in (f"10.3886/E{project_id}V1", f"10.3886/ICPSR{project_id}"):
+            resp = self.client.get(f"https://api.datacite.org/dois/{candidate_doi}")
+            if resp.status_code == 200:
+                payload = resp.json()
+                attrs = payload.get("data", {}).get("attributes", {})
+                if isinstance(attrs, dict):
+                    attrs = dict(attrs)
+                    attrs["_resolved_doi"] = candidate_doi
+                    return attrs
+        return None
+
     def fetch_project(self, identifier: str) -> PaperBundle:
-        """Fetch public OpenICPSR metadata JSON and build an Economics PaperBundle."""
+        """Fetch OpenICPSR metadata JSON, falling back to DataCite DOI metadata if gated."""
         project_id = _extract_icpsr_id(identifier)
         meta_url = f"{self.base_url}/{project_id}/version/V1/view"
-        resp = self.client.get(meta_url, headers={"Accept": "application/json"})
-        resp.raise_for_status()
-
-        raw_text = resp.text
         title = f"OpenICPSR Project {project_id}"
         description = ""
         files: list[str] = []
         year: int | None = None
         restricted = False
+        doi = f"10.3886/E{project_id}V1"
 
-        if "application/json" in resp.headers.get(
-            "content-type", ""
-        ) or raw_text.lstrip().startswith("{"):
-            data: dict[str, Any] = resp.json()
-            title = str(data.get("title") or title)
-            description = str(data.get("summary") or data.get("description") or "")
-            raw_files = data.get("files") or []
-            if isinstance(raw_files, list):
-                files = [str(f) for f in raw_files]
-            pub_date = str(data.get("publicationDate") or "")
-            if len(pub_date) >= 4 and pub_date[:4].isdigit():
-                year = int(pub_date[:4])
-            restricted = bool(data.get("restricted", False))
-        else:
-            # Parse minimal title & file references from landing payload
-            m_title = re.search(r"<title>(.*?)</title>", raw_text, re.IGNORECASE | re.DOTALL)
-            if m_title:
-                title = " ".join(m_title.group(1).split())
-            description = raw_text[:4000]
-            restricted = (
-                "restricted use" in raw_text.lower() or "apply for access" in raw_text.lower()
-            )
+        try:
+            resp = self.client.get(meta_url, headers={"Accept": "application/json"})
+            resp.raise_for_status()
+            raw_text = resp.text
+            if "application/json" in resp.headers.get(
+                "content-type", ""
+            ) or raw_text.lstrip().startswith("{"):
+                data: dict[str, Any] = resp.json()
+                title = str(data.get("title") or title)
+                description = str(data.get("summary") or data.get("description") or "")
+                raw_files = data.get("files") or []
+                if isinstance(raw_files, list):
+                    files = [str(f) for f in raw_files]
+                pub_date = str(data.get("publicationDate") or "")
+                if len(pub_date) >= 4 and pub_date[:4].isdigit():
+                    year = int(pub_date[:4])
+                restricted = bool(data.get("restricted", False))
+            else:
+                # Parse minimal title & file references from landing payload
+                m_title = re.search(r"<title>(.*?)</title>", raw_text, re.IGNORECASE | re.DOTALL)
+                if m_title:
+                    title = " ".join(m_title.group(1).split())
+                description = raw_text[:4000]
+                restricted = (
+                    "restricted use" in raw_text.lower() or "apply for access" in raw_text.lower()
+                )
+        except httpx.HTTPError:
+            dc = self._fetch_datacite_fallback(project_id)
+            if dc is None:
+                raise
+            doi = str(dc.get("_resolved_doi") or doi)
+            titles = dc.get("titles") or []
+            if isinstance(titles, list) and titles:
+                first_title = titles[0]
+                if isinstance(first_title, dict) and first_title.get("title"):
+                    title = str(first_title["title"])
+            descs = dc.get("descriptions") or []
+            if isinstance(descs, list):
+                description = "\n\n".join(
+                    str(d.get("description", ""))
+                    for d in descs
+                    if isinstance(d, dict) and d.get("description")
+                )
+            pub_year = dc.get("publicationYear")
+            if isinstance(pub_year, int):
+                year = pub_year
+            rights_text = " ".join(
+                str(r.get("rights", ""))
+                for r in (dc.get("rightsList") or [])
+                if isinstance(r, dict)
+            ).lower()
+            restricted = "restricted" in rights_text or "restricted" in description.lower()
 
         code_files = [
             f
@@ -181,7 +227,7 @@ class IcpsrConnector(HttpConnector):
         readme_files = [f for f in files if f.lower().startswith("readme") or "readme" in f.lower()]
 
         link = ArtifactLink(
-            url=f"https://doi.org/10.3886/E{project_id}V1",
+            url=f"https://doi.org/{doi}",
             kind="data",
             host="icpsr",
             status=ArtifactStatus.BLOCKED_ACCESS if restricted else ArtifactStatus.RESOLVED,
@@ -191,7 +237,7 @@ class IcpsrConnector(HttpConnector):
             source_repo="icpsr",
             title=title,
             published_year=year,
-            doi=f"10.3886/E{project_id}V1",
+            doi=doi,
             primary_profile=FieldProfile.ECONOMICS,
             abstract=description,
             full_text=description,
