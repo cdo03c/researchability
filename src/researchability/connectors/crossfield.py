@@ -78,7 +78,8 @@ class OsfConnector(HttpConnector):
         """Fetch an OSF node, registration, or PsyArXiv preprint metadata bundle."""
         node_id = _extract_osf_node_id(identifier)
         lowered = identifier.lower()
-        if is_preprint or "psyarxiv" in lowered or "10.31234" in lowered:
+        is_psyarxiv = is_preprint or "psyarxiv" in lowered or "10.31234" in lowered
+        if is_psyarxiv:
             endpoint = f"{self.base_url}/preprints/{node_id}/"
             resp = self.client.get(endpoint)
         elif "registrations" in lowered:
@@ -113,12 +114,20 @@ class OsfConnector(HttpConnector):
         if not any(existing.url == self_link.url for existing in links):
             links.insert(0, self_link)
 
+        base_node_id = re.sub(r"_v\d+$", "", node_id, flags=re.IGNORECASE)
+        default_doi = (
+            f"10.31234/osf.io/{base_node_id}"
+            if is_psyarxiv
+            else f"10.17605/OSF.IO/{base_node_id.upper()}"
+        )
+        resolved_doi = str(attrs.get("preprint_doi") or default_doi)
+
         return PaperBundle(
             paper_id=f"osf:{node_id}",
             source_repo="osf",
             title=title,
             published_year=year,
-            doi=f"10.17605/OSF.IO/{node_id.upper()}",
+            doi=resolved_doi,
             primary_profile=profile,
             abstract=desc,
             full_text=desc,
@@ -146,9 +155,22 @@ class IcpsrConnector(HttpConnector):
         super().__init__(http_client=http_client, timeout=timeout)
         self.base_url = base_url.rstrip("/")
 
-    def _fetch_datacite_fallback(self, project_id: str) -> dict[str, Any] | None:
+    def _extract_version(self, identifier: str) -> str:
+        ver_match = re.search(r"(?:version[/=]|E\d+)(V\d+)\b", identifier, re.IGNORECASE)
+        return ver_match.group(1).upper() if ver_match else "V1"
+
+    def _fetch_datacite_fallback(
+        self,
+        project_id: str,
+        preferred_version: str = "V1",
+    ) -> dict[str, Any] | None:
         """Query DataCite DOI API when OpenICPSR web endpoints block automated requests."""
-        for candidate_doi in (f"10.3886/E{project_id}V1", f"10.3886/ICPSR{project_id}"):
+        versions = list(dict.fromkeys([preferred_version, "V1", "V2", "V3"]))
+        candidates = [
+            *(f"10.3886/E{project_id}{v}" for v in versions),
+            f"10.3886/ICPSR{project_id}",
+        ]
+        for candidate_doi in candidates:
             resp = self.client.get(f"https://api.datacite.org/dois/{candidate_doi}")
             if resp.status_code == 200:
                 payload = resp.json()
@@ -162,16 +184,26 @@ class IcpsrConnector(HttpConnector):
     def fetch_project(self, identifier: str) -> PaperBundle:
         """Fetch OpenICPSR metadata JSON, falling back to DataCite DOI metadata if gated."""
         project_id = _extract_icpsr_id(identifier)
-        meta_url = f"{self.base_url}/{project_id}/version/V1/view"
+        version = self._extract_version(identifier)
+        meta_url = f"{self.base_url}/{project_id}/version/{version}/view"
         title = f"OpenICPSR Project {project_id}"
         description = ""
         files: list[str] = []
         year: int | None = None
         restricted = False
-        doi = f"10.3886/E{project_id}V1"
+        doi = f"10.3886/E{project_id}{version}"
 
         try:
             resp = self.client.get(meta_url, headers={"Accept": "application/json"})
+            if resp.status_code == 404 and version == "V1":
+                v2_resp = self.client.get(
+                    f"{self.base_url}/{project_id}/version/V2/view",
+                    headers={"Accept": "application/json"},
+                )
+                if v2_resp.status_code < 400:
+                    resp = v2_resp
+                    version = "V2"
+                    doi = f"10.3886/E{project_id}V2"
             resp.raise_for_status()
             raw_text = resp.text
             if "application/json" in resp.headers.get(
@@ -197,7 +229,7 @@ class IcpsrConnector(HttpConnector):
                     "restricted use" in raw_text.lower() or "apply for access" in raw_text.lower()
                 )
         except httpx.HTTPError:
-            dc = self._fetch_datacite_fallback(project_id)
+            dc = self._fetch_datacite_fallback(project_id, preferred_version=version)
             if dc is None:
                 raise
             doi = str(dc.get("_resolved_doi") or doi)

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -15,6 +17,8 @@ from pydantic import BaseModel, Field
 from researchability.models import AuditReport, FieldProfile, PaperBundle
 from researchability.registry import GateRegistry
 
+logger = logging.getLogger(__name__)
+SCHEMA_VERSION = 2
 _VALID_PARTITIONS = {"source_repo", "profile", "published_year"}
 
 
@@ -76,7 +80,16 @@ class ResearchabilityStore:
             conn.close()
 
     def _init_schema(self) -> None:
+        now_utc = datetime.now(UTC).replace(tzinfo=None)
         with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    version INTEGER NOT NULL,
+                    applied_at TIMESTAMP NOT NULL
+                )
+                """
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS papers (
@@ -112,7 +125,8 @@ class ResearchabilityStore:
                     blocked_count INTEGER NOT NULL,
                     na_count INTEGER NOT NULL,
                     flags_json VARCHAR NOT NULL,
-                    report_json VARCHAR NOT NULL
+                    report_json VARCHAR NOT NULL,
+                    core_composite_score DOUBLE
                 )
                 """
             )
@@ -149,6 +163,19 @@ class ResearchabilityStore:
                 )
                 """
             )
+            conn.execute(
+                "ALTER TABLE audit_reports ADD COLUMN IF NOT EXISTS core_composite_score DOUBLE"
+            )
+            row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+            current_version = int(row[0]) if row and row[0] is not None else 0
+            if current_version < SCHEMA_VERSION:
+                conn.execute(
+                    "INSERT INTO schema_version VALUES (?, ?)",
+                    [SCHEMA_VERSION, now_utc],
+                )
+                logger.info(
+                    "Applied DuckDB warehouse schema v%s at %s", SCHEMA_VERSION, self.db_path
+                )
 
     def save_audit(
         self,
@@ -185,8 +212,14 @@ class ResearchabilityStore:
                 )
                 conn.execute(
                     """
-                    INSERT OR REPLACE INTO audit_reports VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    INSERT OR REPLACE INTO audit_reports (
+                        paper_id, source_repo, profile, published_year, generated_at,
+                        funnel_depth, composite_score, unweighted_pass_rate,
+                        zero_touch_reproducible, repaired_reproducible,
+                        passed_count, failed_count, blocked_count, na_count,
+                        flags_json, report_json, core_composite_score
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     [
@@ -206,6 +239,7 @@ class ResearchabilityStore:
                         report.counts.get("na", 0),
                         json.dumps(report.human_review_flags),
                         report.model_dump_json(),
+                        report.core_composite_score,
                     ],
                 )
                 conn.execute(
@@ -249,7 +283,8 @@ class ResearchabilityStore:
                 )
                 conn.execute("COMMIT")
             except Exception:
-                conn.execute("ROLLBACK")
+                with contextlib.suppress(Exception):
+                    conn.execute("ROLLBACK")
                 raise
 
     def record_failure(self, paper_id: str, source_repo: str, error_message: str) -> None:
@@ -307,23 +342,38 @@ class ResearchabilityStore:
         with self._connect() as conn:
             for table_name, (select_sql, part_cols) in table_specs.items():
                 dest_dir = parquet_root / table_name
-                if dest_dir.exists():
-                    shutil.rmtree(dest_dir)
-                dest_dir.mkdir(parents=True, exist_ok=True)
+                staging_dir = parquet_root / f".staging_{table_name}_{id(conn)}"
+                backup_dir = parquet_root / f".backup_{table_name}_{id(conn)}"
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir)
+                staging_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    row_count = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+                    if row_count and row_count[0] > 0:
+                        escaped_staging = str(staging_dir).replace("'", "''")
+                        part_clause = ", ".join(part_cols)
+                        copy_sql = (
+                            f"COPY ({select_sql}) TO '{escaped_staging}' "
+                            f"(FORMAT PARQUET, PARTITION_BY ({part_clause}), OVERWRITE_OR_IGNORE 1)"
+                        )
+                        conn.execute(copy_sql)
 
-                row_count = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
-                if not row_count or row_count[0] == 0:
+                    had_existing = dest_dir.exists()
+                    if had_existing:
+                        if backup_dir.exists():
+                            shutil.rmtree(backup_dir)
+                        dest_dir.rename(backup_dir)
+                    try:
+                        staging_dir.rename(dest_dir)
+                    except Exception:
+                        if had_existing and backup_dir.exists() and not dest_dir.exists():
+                            backup_dir.rename(dest_dir)
+                        raise
+                    finally:
+                        shutil.rmtree(backup_dir, ignore_errors=True)
                     exports[table_name] = dest_dir
-                    continue
-
-                escaped_dest = str(dest_dir).replace("'", "''")
-                part_clause = ", ".join(part_cols)
-                copy_sql = (
-                    f"COPY ({select_sql}) TO '{escaped_dest}' "
-                    f"(FORMAT PARQUET, PARTITION_BY ({part_clause}), OVERWRITE_OR_IGNORE 1)"
-                )
-                conn.execute(copy_sql)
-                exports[table_name] = dest_dir
+                finally:
+                    shutil.rmtree(staging_dir, ignore_errors=True)
 
         return exports
 
@@ -352,22 +402,45 @@ class ResearchabilityStore:
             )
         return rows
 
-    def failure_modes(self, limit: int = 20) -> list[FailureModeRow]:
+    def failure_modes(
+        self,
+        *,
+        profile: FieldProfile | None = None,
+        limit: int = 20,
+    ) -> list[FailureModeRow]:
         """Return most frequent gate failure and blocked modes."""
         with self._connect() as conn:
-            total_row = conn.execute("SELECT COUNT(*) FROM audit_reports").fetchone()
-            total_papers = int(total_row[0]) if total_row else 0
-            rows = conn.execute(
-                """
-                SELECT gate_id, problem_domain, status, COUNT(*) AS cnt
-                FROM gate_results
-                WHERE status = 'FAIL' OR status LIKE 'BLOCKED_%'
-                GROUP BY gate_id, problem_domain, status
-                ORDER BY cnt DESC, gate_id ASC
-                LIMIT ?
-                """,
-                [limit],
-            ).fetchall()
+            if profile is not None:
+                total_row = conn.execute(
+                    "SELECT COUNT(*) FROM audit_reports WHERE profile = ?",
+                    [profile.value],
+                ).fetchone()
+                total_papers = int(total_row[0]) if total_row else 0
+                rows = conn.execute(
+                    """
+                    SELECT gate_id, problem_domain, status, COUNT(*) AS cnt
+                    FROM gate_results
+                    WHERE (status = 'FAIL' OR status LIKE 'BLOCKED_%') AND profile = ?
+                    GROUP BY gate_id, problem_domain, status
+                    ORDER BY cnt DESC, gate_id ASC
+                    LIMIT ?
+                    """,
+                    [profile.value, limit],
+                ).fetchall()
+            else:
+                total_row = conn.execute("SELECT COUNT(*) FROM audit_reports").fetchone()
+                total_papers = int(total_row[0]) if total_row else 0
+                rows = conn.execute(
+                    """
+                    SELECT gate_id, problem_domain, status, COUNT(*) AS cnt
+                    FROM gate_results
+                    WHERE status = 'FAIL' OR status LIKE 'BLOCKED_%'
+                    GROUP BY gate_id, problem_domain, status
+                    ORDER BY cnt DESC, gate_id ASC
+                    LIMIT ?
+                    """,
+                    [limit],
+                ).fetchall()
 
         return [
             FailureModeRow(
@@ -380,11 +453,13 @@ class ResearchabilityStore:
             for gate_id, domain, status, cnt in rows
         ]
 
-    def temporal_trends(self) -> list[TemporalTrendRow]:
+    def temporal_trends(self, *, profile: FieldProfile | None = None) -> list[TemporalTrendRow]:
         """Aggregate reproducibility metrics by source repository, field profile, and year."""
         with self._connect() as conn:
+            where_clause = "WHERE profile = ?" if profile is not None else ""
+            params: list[object] = [profile.value] if profile is not None else []
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     source_repo,
                     profile,
@@ -407,9 +482,11 @@ class ResearchabilityStore:
                         END
                     ) AS repaired_rate
                 FROM audit_reports
+                {where_clause}
                 GROUP BY source_repo, profile, yr
                 ORDER BY yr ASC, source_repo ASC, profile ASC
-                """
+                """,
+                params,
             ).fetchall()
 
         return [
@@ -442,8 +519,8 @@ class ResearchabilityStore:
         return AnalyticsSummary(
             total_papers=total,
             funnel_dropoff=self.funnel_dropoff(profile=profile),
-            failure_modes=self.failure_modes(),
-            temporal_trends=self.temporal_trends(),
+            failure_modes=self.failure_modes(profile=profile),
+            temporal_trends=self.temporal_trends(profile=profile),
         )
 
 

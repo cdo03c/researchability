@@ -9,7 +9,11 @@ import httpx
 from pydantic import BaseModel, Field
 
 from researchability.connectors.base import HttpConnector
-from researchability.connectors.links import extract_artifact_links, scan_workspace_files
+from researchability.connectors.links import (
+    extract_artifact_links,
+    safe_resolve_under,
+    scan_workspace_files,
+)
 from researchability.models import (
     ArtifactLink,
     ArtifactManifest,
@@ -186,6 +190,7 @@ class DataverseConnector(HttpConnector):
 
         if download_files and local_dir is not None and dataset_status == ArtifactStatus.RESOLVED:
             local_dir.mkdir(parents=True, exist_ok=True)
+            downloaded_bytes = 0
             for entry in files_raw:
                 if entry.get("restricted"):
                     continue
@@ -194,19 +199,33 @@ class DataverseConnector(HttpConnector):
                 filename = entry.get("label") or df.get("filename")
                 if not file_id or not filename:
                     continue
-                dir_label = entry.get("directoryLabel", "").strip("/")
-                dest = (
-                    local_dir / dir_label / Path(filename).name
-                    if dir_label
-                    else local_dir / Path(filename).name
-                )
+                dir_label = str(entry.get("directoryLabel") or "").strip("/")
+                safe_name = Path(str(filename)).name
+                if not safe_name or safe_name in {".", ".."}:
+                    continue
+                rel_dest = Path(dir_label) / safe_name if dir_label else Path(safe_name)
+                dest = safe_resolve_under(local_dir, rel_dest)
+                if dest is None:
+                    continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                file_resp = self.client.get(f"{self.base_url}/api/access/datafile/{file_id}")
-                if file_resp.status_code == 200:
-                    dest.write_bytes(file_resp.content)
-                    downloaded_paths.append(dest.relative_to(local_dir).as_posix())
-                elif file_resp.status_code in {401, 403}:
-                    dataset_status = ArtifactStatus.BLOCKED_ACCESS
+                file_url = f"{self.base_url}/api/access/datafile/{file_id}"
+                with self.client.stream("GET", file_url) as file_resp:
+                    if file_resp.status_code == 200:
+                        exceeded = False
+                        with dest.open("wb") as out_fh:
+                            for chunk in file_resp.iter_bytes(chunk_size=65_536):
+                                downloaded_bytes += len(chunk)
+                                if downloaded_bytes > max_total_bytes:
+                                    exceeded = True
+                                    break
+                                out_fh.write(chunk)
+                        if exceeded:
+                            dest.unlink(missing_ok=True)
+                            dataset_status = ArtifactStatus.BLOCKED_DATA_SIZE
+                            break
+                        downloaded_paths.append(dest.relative_to(local_dir.resolve()).as_posix())
+                    elif file_resp.status_code in {401, 403}:
+                        dataset_status = ArtifactStatus.BLOCKED_ACCESS
 
         if local_dir is not None and local_dir.exists():
             code_files, data_files, manifest_files, readme_files = scan_workspace_files(local_dir)

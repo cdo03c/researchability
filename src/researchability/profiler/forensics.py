@@ -45,7 +45,7 @@ _NEG_SPREAD_RE = re.compile(
     r"\b(?:SD|SE|standard\s+error|variance)\s*=\s*(-\d+(?:\.\d+)?)\b", re.IGNORECASE
 )
 _R2_RE = re.compile(r"(?:R\^2|R²)\s*=\s*(-?\d+(?:\.\d+)?)\b")
-_BAD_P_RE = re.compile(r"\bp\s*=\s*(-?\d+(?:\.\d+)?)\b", re.IGNORECASE)
+_BAD_P_RE = re.compile(r"\bp\s*=\s*(-?\d+\.\d+)\b", re.IGNORECASE)
 _GRIM_MEAN_N_RE = re.compile(
     r"\b(?:M|mean)\s*=\s*(\d+\.\d{1,3})\s*[,;(]\s*[Nn]\s*=\s*(\d{1,3})\b",
     re.IGNORECASE,
@@ -371,17 +371,25 @@ def check_table_stars_and_cis(text: str) -> list[str]:
             )
 
     if len(star_matches) >= 2:
-        for match in _REG_UNSTARRED_ENTRY_RE.finditer(text):
-            coef = float(match.group(1))
-            se = float(match.group(2))
-            if se <= 0:
-                continue
-            p_val = two_tailed_z_p(abs(coef) / se)
-            if p_val < 0.0005:
-                flags.append(
-                    f"Missing significance stars on '{match.group(0).strip()}' "
-                    f"(implied p={p_val:.5f} < 0.001 in starred table)"
-                )
+        # Restrict unstarred table checks to lines near starred table rows to avoid prose hits
+        lines = text.splitlines()
+        starred_lines: set[int] = set()
+        for idx, line_text in enumerate(lines):
+            if _REG_STAR_ENTRY_RE.search(line_text):
+                for nearby in range(max(0, idx - 5), min(len(lines), idx + 6)):
+                    starred_lines.add(nearby)
+        for line_idx in sorted(starred_lines):
+            for match in _REG_UNSTARRED_ENTRY_RE.finditer(lines[line_idx]):
+                coef = float(match.group(1))
+                se = float(match.group(2))
+                if se <= 0:
+                    continue
+                p_val = two_tailed_z_p(abs(coef) / se)
+                if p_val < 0.0005:
+                    flags.append(
+                        f"Missing significance stars on '{match.group(0).strip()}' "
+                        f"(implied p={p_val:.5f} < 0.001 in starred table)"
+                    )
 
     for match in _CI_PAIR_RE.finditer(text):
         lo = float(match.group(1))

@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Annotated
 
+import httpx
 import typer
+from pydantic import ValidationError
 
 from researchability.batch import BatchConfig, BatchSweepRunner, BatchTarget
 from researchability.calibration import (
@@ -26,9 +30,9 @@ from researchability.gates import (
     evaluate_stage0_to_5_with_context,
     render_human_dossier,
 )
-from researchability.llm import GeminiClient
+from researchability.llm import GeminiApiError, GeminiClient, MissingApiKeyError
 from researchability.models import AuditReport, FieldProfile, GateResult, PaperBundle
-from researchability.registry import GateRegistry
+from researchability.registry import GateRegistry, GateRegistryError
 from researchability.sandbox import SandboxConfig
 from researchability.scoring import (
     compute_audit_report,
@@ -49,6 +53,26 @@ ingest_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(ingest_app, name="ingest")
+
+
+def _configure_logging(verbose: bool) -> None:
+    level_name = "INFO" if verbose else os.getenv("RESEARCHABILITY_LOG_LEVEL", "WARNING").upper()
+    level = getattr(logging, level_name, logging.WARNING)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+
+@app.callback()
+def main_callback(
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Enable structured INFO logging to stderr."),
+    ] = False,
+) -> None:
+    """Configure runtime logging for researchability CLI invocations."""
+    _configure_logging(verbose)
 
 
 @app.command()
@@ -101,10 +125,14 @@ def ingest_arxiv(
     ] = True,
 ) -> None:
     """Ingest an arXiv paper into a normalized PaperBundle."""
-    with ArxivConnector() as connector, ArtifactResolver() as resolver:
-        bundle = connector.fetch_paper(arxiv_id, workdir=workdir)
-        if resolve_artifacts:
-            bundle = resolver.resolve_bundle(bundle, workdir=workdir)
+    try:
+        with ArxivConnector() as connector, ArtifactResolver() as resolver:
+            bundle = connector.fetch_paper(arxiv_id, workdir=workdir)
+            if resolve_artifacts:
+                bundle = resolver.resolve_bundle(bundle, workdir=workdir)
+    except (httpx.HTTPError, ValueError, OSError) as exc:
+        typer.echo(f"Error ingesting arXiv '{arxiv_id}': {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
     payload = bundle.model_dump_json(indent=2)
     if output:
@@ -134,12 +162,21 @@ def ingest_dataverse(
     ] = True,
 ) -> None:
     """Ingest a Harvard Dataverse dataset into a normalized PaperBundle."""
-    with DataverseConnector() as connector:
-        bundle = connector.fetch_dataset(
-            persistent_id,
-            workdir=workdir,
-            download_files=download_files and workdir is not None,
+    if download_files and workdir is None:
+        typer.echo(
+            "Warning: --download requested without --workdir; fetching manifest only.",
+            err=True,
         )
+    try:
+        with DataverseConnector() as connector:
+            bundle = connector.fetch_dataset(
+                persistent_id,
+                workdir=workdir,
+                download_files=download_files and workdir is not None,
+            )
+    except (httpx.HTTPError, ValueError, OSError) as exc:
+        typer.echo(f"Error ingesting Dataverse '{persistent_id}': {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
     payload = bundle.model_dump_json(indent=2)
     if output:
@@ -304,35 +341,46 @@ def audit(
     ] = None,
 ) -> None:
     """Run automated Stage 0-3 (or Stage 0-5 with --execute) reproducibility gates."""
-    paper = PaperBundle.model_validate_json(bundle_path.read_text(encoding="utf-8"))
-    registry = GateRegistry.from_yaml(config)
-    llm_client = GeminiClient() if use_llm else None
-    dossier_md: str | None = None
-    robustness_spec: dict[str, object] | None = None
+    try:
+        paper = PaperBundle.model_validate_json(bundle_path.read_text(encoding="utf-8"))
+        registry = GateRegistry.from_yaml(config)
+        llm_client = GeminiClient() if use_llm else None
+        dossier_md: str | None = None
+        robustness_spec: dict[str, object] | None = None
 
-    if execute:
-        report_obj, ctx = evaluate_stage0_to_5_with_context(
-            paper=paper,
-            registry=registry,
-            workdir=workdir,
-            llm=llm_client,
-            profile=profile,
-            sandbox_config=SandboxConfig(timeout_seconds=timeout),
-        )
-        raw_dossier = ctx.extracted_claims.get("human_dossier_markdown")
-        if isinstance(raw_dossier, str):
-            dossier_md = raw_dossier
-        raw_spec = ctx.extracted_claims.get("robustness_spec")
-        if isinstance(raw_spec, dict):
-            robustness_spec = raw_spec
-    else:
-        report_obj = evaluate_stage0_to_3(
-            paper=paper,
-            registry=registry,
-            workdir=workdir,
-            llm=llm_client,
-            profile=profile,
-        )
+        if execute:
+            report_obj, ctx = evaluate_stage0_to_5_with_context(
+                paper=paper,
+                registry=registry,
+                workdir=workdir,
+                llm=llm_client,
+                profile=profile,
+                sandbox_config=SandboxConfig(timeout_seconds=timeout),
+            )
+            raw_dossier = ctx.extracted_claims.get("human_dossier_markdown")
+            if isinstance(raw_dossier, str):
+                dossier_md = raw_dossier
+            raw_spec = ctx.extracted_claims.get("robustness_spec")
+            if isinstance(raw_spec, dict):
+                robustness_spec = raw_spec
+        else:
+            report_obj = evaluate_stage0_to_3(
+                paper=paper,
+                registry=registry,
+                workdir=workdir,
+                llm=llm_client,
+                profile=profile,
+            )
+    except (
+        ValidationError,
+        GateRegistryError,
+        MissingApiKeyError,
+        GeminiApiError,
+        OSError,
+        ValueError,
+    ) as exc:
+        typer.echo(f"Audit failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
     payload = report_obj.model_dump_json(indent=2)
     if output:
@@ -426,32 +474,35 @@ def batch(
         execute=execute,
         use_llm=use_llm,
     )
-    runner = BatchSweepRunner(config=cfg)
-
-    if source == "bundles":
-        if bundles_dir is None or not bundles_dir.is_dir():
+    with BatchSweepRunner(config=cfg) as runner:
+        if source == "bundles":
+            if bundles_dir is None or not bundles_dir.is_dir():
+                typer.echo(
+                    "--bundles-dir must be an existing directory when --source bundles",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            papers = [
+                PaperBundle.model_validate_json(p.read_text(encoding="utf-8"))
+                for p in sorted(bundles_dir.glob("*.json"))
+            ][:limit]
+            summary = runner.run_bundles(papers)
+        elif source == "arxiv":
+            targets: list[BatchTarget] = runner.discover_arxiv_targets(
+                query=query,
+                categories=category,
+                limit=limit,
+            )
+            summary = runner.sweep_targets(targets)
+        elif source == "dataverse":
+            targets = runner.discover_dataverse_targets(query=query or "*", limit=limit)
+            summary = runner.sweep_targets(targets)
+        else:
             typer.echo(
-                "--bundles-dir must be an existing directory when --source bundles", err=True
+                f"Unsupported --source '{source}'. Use arxiv, dataverse, or bundles.",
+                err=True,
             )
             raise typer.Exit(code=2)
-        papers = [
-            PaperBundle.model_validate_json(p.read_text(encoding="utf-8"))
-            for p in sorted(bundles_dir.glob("*.json"))
-        ][:limit]
-        summary = runner.run_bundles(papers)
-    elif source == "arxiv":
-        targets: list[BatchTarget] = runner.discover_arxiv_targets(
-            query=query,
-            categories=category,
-            limit=limit,
-        )
-        summary = runner.sweep_targets(targets)
-    elif source == "dataverse":
-        targets = runner.discover_dataverse_targets(query=query or "*", limit=limit)
-        summary = runner.sweep_targets(targets)
-    else:
-        typer.echo(f"Unsupported --source '{source}'. Use arxiv, dataverse, or bundles.", err=True)
-        raise typer.Exit(code=2)
 
     payload = summary.model_dump_json(indent=2)
     if output:
@@ -511,6 +562,14 @@ def calibrate(
         bool,
         typer.Option("--execute/--no-execute", help="Include Stage 4-5 sandbox execution."),
     ] = False,
+    profile: Annotated[
+        FieldProfile | None,
+        typer.Option("--profile", "-p", help="Override sample primary_profile overlay."),
+    ] = None,
+    timeout: Annotated[
+        int,
+        typer.Option("--timeout", help="Hard timeout in seconds per sandboxed container command."),
+    ] = 300,
     output: Annotated[
         Path | None,
         typer.Option("--output", "-o", help="Optional CalibrationReport JSON path."),
@@ -521,9 +580,25 @@ def calibrate(
     ] = None,
 ) -> None:
     """Validate automated binary gates against human ground-truth audit labels."""
-    samples = load_calibration_dataset(dataset_path)
-    llm_client = GeminiClient() if use_llm else None
-    report_obj = evaluate_calibration(samples, llm=llm_client, execute=execute)
+    try:
+        samples = load_calibration_dataset(dataset_path)
+        llm_client = GeminiClient() if use_llm else None
+        report_obj = evaluate_calibration(
+            samples,
+            llm=llm_client,
+            execute=execute,
+            profile=profile,
+            sandbox_config=SandboxConfig(timeout_seconds=timeout),
+        )
+    except (
+        ValidationError,
+        MissingApiKeyError,
+        GeminiApiError,
+        OSError,
+        ValueError,
+    ) as exc:
+        typer.echo(f"Calibration failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     payload = report_obj.model_dump_json(indent=2)
     if output:
         output.write_text(payload + "\n", encoding="utf-8")

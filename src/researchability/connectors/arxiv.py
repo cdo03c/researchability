@@ -14,8 +14,11 @@ from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
 from researchability.connectors.base import HttpConnector
-from researchability.connectors.links import extract_artifact_links
+from researchability.connectors.links import extract_artifact_links, safe_resolve_under
 from researchability.models import ArtifactManifest, FieldProfile, PaperBundle
+
+_MAX_LATEX_EXTRACTED_BYTES = 100 * 1024 * 1024
+_MAX_LATEX_MEMBERS = 2000
 
 _ATOM_NS = {
     "atom": "http://www.w3.org/2005/Atom",
@@ -42,12 +45,24 @@ class ArxivRecord(BaseModel):
 
 
 def normalize_arxiv_id(raw_id: str) -> str:
-    """Strip URL prefixes or version suffixes into canonical arXiv ID."""
+    """Strip URL prefixes and .pdf suffixes into canonical arXiv ID."""
     cleaned = raw_id.strip()
-    for prefix in ("https://arxiv.org/abs/", "http://arxiv.org/abs/", "arxiv:"):
+    for prefix in (
+        "https://arxiv.org/abs/",
+        "http://arxiv.org/abs/",
+        "https://arxiv.org/pdf/",
+        "http://arxiv.org/pdf/",
+        "https://arxiv.org/e-print/",
+        "http://arxiv.org/e-print/",
+        "arxiv:",
+    ):
         if cleaned.lower().startswith(prefix):
             cleaned = cleaned[len(prefix) :]
-    return cleaned.rstrip("/")
+            break
+    cleaned = cleaned.rstrip("/")
+    if cleaned.lower().endswith(".pdf"):
+        cleaned = cleaned[:-4]
+    return cleaned
 
 
 def infer_profile_from_categories(categories: list[str]) -> FieldProfile:
@@ -104,37 +119,56 @@ def _parse_atom_feed(xml_text: str) -> list[ArxivRecord]:
 
 
 def _extract_latex_from_bytes(
-    payload: bytes, target_dir: Path | None = None
+    payload: bytes,
+    target_dir: Path | None = None,
+    *,
+    max_extracted_bytes: int = _MAX_LATEX_EXTRACTED_BYTES,
+    max_members: int = _MAX_LATEX_MEMBERS,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Extract concatenated .tex text and raw table environments from tar.gz or gzip/plain tex."""
     tex_chunks: list[str] = []
     if target_dir is not None:
         target_dir.mkdir(parents=True, exist_ok=True)
 
+    total_bytes = 0
     # Attempt tar archive (gzipped or plain)
     try:
         with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*") as tf:
-            for member in tf.getmembers():
+            for count, member in enumerate(tf.getmembers()):
+                if count >= max_members:
+                    break
                 if not member.isfile():
                     continue
+                if member.size < 0 or total_bytes + member.size > max_extracted_bytes:
+                    continue
+                rel_member = Path(member.name.lstrip("/"))
+                if (
+                    any(part.startswith(".") for part in rel_member.parts)
+                    or ".." in rel_member.parts
+                ):
+                    continue
+                extracted = tf.extractfile(member)
+                if extracted is None:
+                    continue
+                content = extracted.read(max_extracted_bytes - total_bytes + 1)
+                if total_bytes + len(content) > max_extracted_bytes:
+                    break
+                total_bytes += len(content)
                 if member.name.endswith(".tex"):
-                    extracted = tf.extractfile(member)
-                    if extracted is not None:
-                        tex_chunks.append(extracted.read().decode("utf-8", errors="replace"))
+                    tex_chunks.append(content.decode("utf-8", errors="replace"))
                 if target_dir is not None:
-                    safe_name = Path(member.name).name
-                    if safe_name and not safe_name.startswith("."):
-                        dest = target_dir / safe_name
-                        extracted = tf.extractfile(member)
-                        if extracted is not None:
-                            dest.write_bytes(extracted.read())
+                    dest = safe_resolve_under(target_dir, rel_member)
+                    if dest is not None:
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_bytes(content)
     except tarfile.TarError:
         # Single gzipped .tex or plain .tex file
         try:
-            decompressed = gzip.decompress(payload).decode("utf-8", errors="replace")
+            with gzip.GzipFile(fileobj=io.BytesIO(payload)) as gz:
+                decompressed = gz.read(max_extracted_bytes).decode("utf-8", errors="replace")
             tex_chunks.append(decompressed)
         except OSError:
-            decoded = payload.decode("utf-8", errors="replace")
+            decoded = payload[:max_extracted_bytes].decode("utf-8", errors="replace")
             if "\\documentclass" in decoded or "\\section" in decoded:
                 tex_chunks.append(decoded)
 
@@ -182,10 +216,18 @@ class ArxivConnector(HttpConnector):
         """Search arXiv via the Atom API."""
         clauses: list[str] = []
         if query:
-            clauses.append(f"all:{query}")
+            cleaned_q = query.replace('"', "").strip()
+            if cleaned_q:
+                if ":" in cleaned_q or " AND " in cleaned_q or " OR " in cleaned_q:
+                    clauses.append(cleaned_q)
+                elif " " in cleaned_q:
+                    clauses.append(f'all:"{cleaned_q}"')
+                else:
+                    clauses.append(f"all:{cleaned_q}")
         if categories:
-            cat_expr = " OR ".join(f"cat:{c}" for c in categories)
-            clauses.append(f"({cat_expr})")
+            cat_expr = " OR ".join(f"cat:{c.strip()}" for c in categories if c.strip())
+            if cat_expr:
+                clauses.append(f"({cat_expr})")
         search_query = " AND ".join(clauses) if clauses else "cat:cs.LG"
 
         resp = self.client.get(

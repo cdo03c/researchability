@@ -11,7 +11,13 @@ from pydantic import BaseModel, Field
 
 from researchability.gates import evaluate_stage0_to_3, evaluate_stage0_to_5
 from researchability.llm import GeminiClient
-from researchability.models import AuditReport, EvaluatorKind, GateStatus, PaperBundle
+from researchability.models import (
+    AuditReport,
+    EvaluatorKind,
+    FieldProfile,
+    GateStatus,
+    PaperBundle,
+)
 from researchability.registry import GateRegistry
 from researchability.sandbox import DockerSandboxRunner, SandboxConfig
 
@@ -241,11 +247,15 @@ def evaluate_calibration(
     registry: GateRegistry | None = None,
     llm: GeminiClient | None = None,
     execute: bool = False,
+    profile: FieldProfile | None = None,
     sandbox: DockerSandboxRunner | None = None,
+    sandbox_config: SandboxConfig | None = None,
 ) -> CalibrationReport:
     """Run automated gates over labeled papers and benchmark against human ground truth."""
     active_registry = registry or GateRegistry.from_yaml()
-    active_sandbox = sandbox or DockerSandboxRunner(SandboxConfig())
+    active_sandbox: DockerSandboxRunner | None = sandbox if execute else None
+    if execute and active_sandbox is None:
+        active_sandbox = DockerSandboxRunner(sandbox_config or SandboxConfig())
     paired: list[tuple[CalibrationSample, AuditReport]] = []
 
     for sample in samples:
@@ -260,6 +270,7 @@ def evaluate_calibration(
                 registry=active_registry,
                 workdir=wd,
                 llm=llm,
+                profile=profile,
                 sandbox=active_sandbox,
             )
         else:
@@ -268,6 +279,7 @@ def evaluate_calibration(
                 registry=active_registry,
                 workdir=wd,
                 llm=llm,
+                profile=profile,
             )
         paired.append((sample, report))
 

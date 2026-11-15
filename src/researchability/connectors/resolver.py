@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from collections.abc import Callable
@@ -11,7 +12,7 @@ from urllib.parse import urlparse
 import httpx
 
 from researchability.connectors.base import HttpConnector
-from researchability.connectors.links import scan_workspace_files
+from researchability.connectors.links import is_safe_public_url, scan_workspace_files
 from researchability.models import ArtifactLink, ArtifactManifest, ArtifactStatus, PaperBundle
 
 _ZENODO_ID_RE = re.compile(r"zenodo\.(?:org/records?|org/record)/(\d+)|10\.5281/zenodo\.(\d+)")
@@ -24,9 +25,14 @@ CloneRunner = Callable[[str, Path], bool]
 def _default_git_clone(repo_url: str, dest: Path) -> bool:
     """Perform a shallow git clone without interactive prompts."""
     dest.parent.mkdir(parents=True, exist_ok=True)
+    safe_env = {"GIT_TERMINAL_PROMPT": "0"}
+    for key in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR"):
+        if key in os.environ:
+            safe_env[key] = os.environ[key]
+    safe_env.setdefault("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
     proc = subprocess.run(
         ["git", "clone", "--depth", "1", repo_url, str(dest)],
-        env={"GIT_TERMINAL_PROMPT": "0", "PATH": "/usr/local/bin:/usr/bin:/bin"},
+        env=safe_env,
         capture_output=True,
         text=True,
         timeout=120,
@@ -62,10 +68,29 @@ class ArtifactResolver(HttpConnector):
         owner, repo = match.group(1), match.group(2)
         canonical_url = f"https://github.com/{owner}/{repo}"
         api_url = f"https://api.github.com/repos/{owner}/{repo}"
-        resp = self.client.get(api_url, headers={"Accept": "application/vnd.github+json"})
+        headers = {"Accept": "application/vnd.github+json"}
+        gh_token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+        if gh_token:
+            headers["Authorization"] = f"Bearer {gh_token}"
+        resp = self.client.get(api_url, headers=headers)
 
         if resp.status_code == 404:
             return link.model_copy(update={"status": ArtifactStatus.BROKEN_404}), [], [], [], []
+        if resp.status_code == 403 and (
+            resp.headers.get("x-ratelimit-remaining") == "0" or "rate limit" in resp.text.lower()
+        ):
+            return (
+                link.model_copy(
+                    update={
+                        "status": ArtifactStatus.UNRESOLVED,
+                        "metadata": {**link.metadata, "rate_limited": True},
+                    }
+                ),
+                [],
+                [],
+                [],
+                [],
+            )
         if resp.status_code in {401, 403}:
             return link.model_copy(update={"status": ArtifactStatus.BLOCKED_ACCESS}), [], [], [], []
         if resp.status_code >= 400:
@@ -167,9 +192,23 @@ class ArtifactResolver(HttpConnector):
         )
 
     def _resolve_http_head(self, link: ArtifactLink) -> ArtifactLink:
+        if not is_safe_public_url(link.url):
+            return link.model_copy(
+                update={
+                    "status": ArtifactStatus.UNRESOLVED,
+                    "metadata": {**link.metadata, "blocked_reason": "unsafe_or_private_url"},
+                }
+            )
         resp = self.client.head(link.url)
         if resp.status_code == 405:
             resp = self.client.get(link.url)
+        if not is_safe_public_url(str(resp.url)):
+            return link.model_copy(
+                update={
+                    "status": ArtifactStatus.UNRESOLVED,
+                    "metadata": {**link.metadata, "blocked_reason": "unsafe_redirect_target"},
+                }
+            )
         if resp.status_code == 404:
             status = ArtifactStatus.BROKEN_404
         elif resp.status_code in {401, 403}:
@@ -187,6 +226,19 @@ class ArtifactResolver(HttpConnector):
         workdir: Path | None = None,
     ) -> tuple[ArtifactLink, list[str], list[str], list[str], list[str]]:
         """Resolve a single ArtifactLink and inspect local repo files when cloned."""
+        if not is_safe_public_url(link.url):
+            return (
+                link.model_copy(
+                    update={
+                        "status": ArtifactStatus.UNRESOLVED,
+                        "metadata": {**link.metadata, "blocked_reason": "unsafe_or_private_url"},
+                    }
+                ),
+                [],
+                [],
+                [],
+                [],
+            )
         if link.host == "github":
             return self._resolve_github(link, workdir)
         if link.host == "zenodo":

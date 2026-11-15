@@ -281,7 +281,7 @@ def eval_g3_10_econ_robustness_specification(ctx: EvaluationContext) -> GateResu
             dict.fromkeys(h.lower() for h in _ECON_ROBUST_RE.findall(c.manuscript_snippet()))
         )
         c.extracted_claims["robustness_spec"] = {
-            "profile": c.paper.primary_profile.value,
+            "profile": c.effective_profile.value,
             "detected_methods": hits,
             "scripts": [
                 f for f in c.paper.artifacts.code_files if f.lower().endswith((".do", ".r", ".py"))

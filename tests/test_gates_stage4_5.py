@@ -46,6 +46,8 @@ def _python_executing_sandbox_runner(
             if fail_build:
                 return CommandResult(returncode=1, stderr="pip resolution error", command=args)
             return CommandResult(returncode=0, stdout="built", command=args)
+        if args[1] == "rmi":
+            return CommandResult(returncode=0, stdout="removed", command=args)
 
         workspace = _extract_workspace_from_docker_args(args) or cwd
         assert workspace is not None
@@ -301,9 +303,12 @@ def test_r_repository_commands_and_cli_dossier_output(tmp_path: Path, monkeypatc
         observed_cmds.append(args)
         if args[1] == "build":
             return CommandResult(returncode=0, stdout="built r image", command=args)
+        if args[1] == "rmi":
+            return CommandResult(returncode=0, stdout="removed", command=args)
         if args[-1] == "main.R":
-            (tmp_path / "results.json").write_text('{"r2": 0.74}', encoding="utf-8")
-            (tmp_path / "fig.pdf").write_bytes(b"%PDF-1.4 mock")
+            target_ws = _extract_workspace_from_docker_args(args) or tmp_path
+            (target_ws / "results.json").write_text('{"r2": 0.74}', encoding="utf-8")
+            (target_ws / "fig.pdf").write_bytes(b"%PDF-1.4 mock")
         return CommandResult(returncode=0, stdout="ok", command=args)
 
     # Monkeypatch DockerSandboxRunner used inside CLI `--execute`

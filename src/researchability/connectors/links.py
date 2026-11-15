@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from pathlib import Path
 from urllib.parse import urlparse
@@ -94,18 +95,69 @@ def _clean_match(raw: str) -> str:
     return raw.rstrip(".,;:!?)\"'\\")
 
 
+def _hostname_matches(hostname: str, domain: str) -> bool:
+    """Return True if hostname equals domain or is a strict subdomain of it."""
+    host = hostname.rstrip(".").lower()
+    dom = domain.lower()
+    return host == dom or host.endswith(f".{dom}")
+
+
+def is_safe_public_url(url: str) -> bool:
+    """Reject non-HTTP(S) schemes, localhost, internal suffixes, and private/link-local IPs."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return False
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    if not hostname:
+        return False
+    if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(
+        (".local", ".internal", ".localhost")
+    ):
+        return False
+    try:
+        ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        return True
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def safe_resolve_under(root: Path, rel_path: str | Path) -> Path | None:
+    """Resolve rel_path under root, returning None on absolute paths or directory traversal."""
+    candidate_rel = Path(rel_path)
+    if candidate_rel.is_absolute() or ".." in candidate_rel.parts:
+        return None
+    root_resolved = root.resolve()
+    target = (root_resolved / candidate_rel).resolve()
+    if not target.is_relative_to(root_resolved):
+        return None
+    return target
+
+
 def classify_url(url: str) -> tuple[str, str]:
     """Return (host_label, artifact_kind) for a candidate artifact URL."""
-    netloc = urlparse(url).netloc.lower()
-    path = urlparse(url).path.lower()
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    path = parsed.path.lower()
     for domain_fragment, host_label, default_kind in _HOST_RULES:
-        if domain_fragment in netloc:
+        if _hostname_matches(hostname, domain_fragment):
             if host_label == "huggingface" and "/datasets/" in path:
                 return host_label, "data"
             if host_label == "osf" and "registr" in path:
                 return host_label, "prereg"
             return host_label, default_kind
-    if "doi.org" in netloc:
+    if _hostname_matches(hostname, "doi.org"):
         if "10.7910/dvn" in path:
             return "dataverse", "data"
         if "10.3886/" in path:

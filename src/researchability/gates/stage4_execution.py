@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import difflib
 import re
 import shutil
@@ -9,8 +10,9 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from researchability.connectors.links import safe_resolve_under
 from researchability.gates.base import EvaluationContext
-from researchability.llm.client import ModelTier
+from researchability.llm.client import GeminiApiError, MissingApiKeyError, ModelTier
 from researchability.models import EvidenceItem, GateResult, GateStatus
 from researchability.profiler.robustness import compare_distributions
 from researchability.sandbox import (
@@ -74,15 +76,19 @@ def _command_for_script(rel_path: str) -> list[str]:
 
 
 def _resolve_script_relpath(workdir: Path, candidate: str) -> str | None:
-    direct = workdir / candidate
-    if direct.is_file():
-        return candidate
-    name = Path(candidate).name
+    cand_path = Path(candidate)
+    if cand_path.is_absolute() or ".." in cand_path.parts:
+        return None
+    root_resolved = workdir.resolve()
+    direct = safe_resolve_under(root_resolved, cand_path)
+    if direct is not None and direct.is_file():
+        return cand_path.as_posix()
+    name = cand_path.name
     for path in sorted(workdir.rglob(name)):
         rel = path.relative_to(workdir)
         if any(part in _IGNORED_COPY_DIRS for part in rel.parts):
             continue
-        if path.is_file():
+        if path.is_file() and path.resolve().is_relative_to(root_resolved):
             return rel.as_posix()
     return None
 
@@ -157,15 +163,21 @@ def _detect_data_mount(workdir: Path) -> Path | None:
     return None
 
 
-def _copy_workspace_for_repair(workdir: Path) -> Path:
-    repair_dir = workdir / ".researchability_sandbox" / "repaired_workspace"
-    if repair_dir.exists():
-        shutil.rmtree(repair_dir)
-    repair_dir.mkdir(parents=True, exist_ok=True)
+def _copy_sandbox_subworkspace(
+    workdir: Path,
+    subdir_name: str,
+    *,
+    target_parent: Path | None = None,
+) -> Path:
+    sandbox_parent = (target_parent or workdir) / ".researchability_sandbox"
+    sub_dir = sandbox_parent / subdir_name
+    if sub_dir.exists():
+        shutil.rmtree(sub_dir)
+    sub_dir.mkdir(parents=True, exist_ok=True)
     for item in workdir.iterdir():
         if item.name in _IGNORED_COPY_DIRS:
             continue
-        dest = repair_dir / item.name
+        dest = sub_dir / item.name
         if item.is_dir():
             shutil.copytree(
                 item,
@@ -174,7 +186,54 @@ def _copy_workspace_for_repair(workdir: Path) -> Path:
             )
         else:
             shutil.copy2(item, dest)
-    return repair_dir
+    return sub_dir
+
+
+def _copy_workspace_for_repair(workdir: Path) -> Path:
+    return _copy_sandbox_subworkspace(workdir, "repaired_workspace")
+
+
+def _inject_python_header_safe(source: str, inject: str) -> str:
+    """Insert Python preamble after shebang, coding cookies, module docstring, and __future__."""
+    lines = source.splitlines(keepends=True)
+    insert_idx = 0
+
+    try:
+        tree = ast.parse(source)
+        after_line = 0
+        body = list(tree.body)
+        if body:
+            first = body[0]
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                after_line = max(after_line, first.end_lineno or first.lineno)
+                body = body[1:]
+        for stmt in body:
+            if isinstance(stmt, ast.ImportFrom) and stmt.module == "__future__":
+                after_line = max(after_line, stmt.end_lineno or stmt.lineno)
+            else:
+                break
+        if after_line > 0:
+            insert_idx = min(after_line, len(lines))
+    except SyntaxError:
+        after_line = 0
+
+    if insert_idx == 0:
+        for idx, line in enumerate(lines[:3]):
+            stripped = line.strip()
+            if (idx == 0 and stripped.startswith("#!")) or (
+                stripped.startswith("#") and "coding" in stripped
+            ):
+                insert_idx = idx + 1
+            else:
+                break
+
+    if insert_idx > 0 and not lines[insert_idx - 1].endswith(("\n", "\r")):
+        lines[insert_idx - 1] = lines[insert_idx - 1] + "\n"
+    return "".join([*lines[:insert_idx], inject, *lines[insert_idx:]])
 
 
 def _find_workspace_file_by_name(root: Path, target_name: str) -> str | None:
@@ -242,12 +301,15 @@ def _apply_deterministic_repairs(
             and ("/" in missing_str or "\\" in missing_str)
         ):
             parent_dir = (repair_dir / missing_str).parent.resolve()
-            if str(parent_dir).startswith(str(repair_root)) and not parent_dir.exists():
+            if (
+                safe_resolve_under(repair_root, Path(missing_str)) is not None
+                and not parent_dir.exists()
+            ):
                 parent_dir.mkdir(parents=True, exist_ok=True)
                 if script_path.suffix.lower() == ".py" and "makedirs" not in updated:
                     rel_parent = Path(missing_str).parent.as_posix()
                     inject = f"import os\nos.makedirs({rel_parent!r}, exist_ok=True)\n"
-                    updated = inject + updated
+                    updated = _inject_python_header_safe(updated, inject)
                 reasons.append(f"Created missing output directory for '{missing_str}'.")
 
     # 3. Handle missing local PYTHONPATH / module imports
@@ -294,15 +356,18 @@ def _apply_llm_repair(
         f"Workspace scripts:\n{workspace_listing}\n\n"
         f"Script contents:\n{old_text[:8000]}"
     )
-    patch, _ = ctx.llm.generate_structured(
-        paper_id=ctx.paper.paper_id,
-        gate_id="G4.5_ANALYSIS_EXECUTES_REPAIRED",
-        prompt=prompt,
-        schema_cls=_LLMRepairPatch,
-        tier=ModelTier.FAST,
-    )
-    target_path = (repair_dir / patch.relative_file).resolve()
-    if not str(target_path).startswith(str(repair_dir.resolve())) or not target_path.is_file():
+    try:
+        patch, _ = ctx.llm.generate_structured(
+            paper_id=ctx.paper.paper_id,
+            gate_id="G4.5_ANALYSIS_EXECUTES_REPAIRED",
+            prompt=prompt,
+            schema_cls=_LLMRepairPatch,
+            tier=ModelTier.FAST,
+        )
+    except (GeminiApiError, MissingApiKeyError):
+        return None
+    target_path = safe_resolve_under(repair_dir, patch.relative_file)
+    if target_path is None or not target_path.is_file():
         return None
 
     file_before = target_path.read_text(encoding="utf-8", errors="replace")
@@ -487,14 +552,20 @@ def _maybe_run_multiseed(
         return
 
     seed_results: list[tuple[int, SandboxRunResult]] = []
+    target_parent = ctx.workdir if ctx.workdir and ctx.workdir.exists() else workdir
     for seed in seeds:
+        seed_dir = _copy_sandbox_subworkspace(
+            workdir,
+            f"multiseed_seed_{seed}",
+            target_parent=target_parent,
+        )
         env = dict(base_env or {})
         env["PYTHONHASHSEED"] = str(seed)
         env["RESEARCHABILITY_SEED"] = str(seed)
         res = sandbox.run_command(
             image_tag,
             main_cmd,
-            workdir,
+            seed_dir,
             data_mount=data_mount,
             env=env,
         )
@@ -505,7 +576,7 @@ def _maybe_run_multiseed(
 
 
 def eval_g4_4_analysis_zero_touch(ctx: EvaluationContext) -> GateResult:
-    """Run main analysis unmodified inside offline sandbox (G4.4)."""
+    """Run main analysis unmodified inside an isolated workspace copy (G4.4)."""
     if ctx.workdir is None or not ctx.workdir.exists():
         return GateResult(
             gate_id="G4.4_ANALYSIS_EXECUTES_ZERO_TOUCH",
@@ -527,13 +598,14 @@ def eval_g4_4_analysis_zero_touch(ctx: EvaluationContext) -> GateResult:
 
     ctx.extracted_claims["main_command"] = main_cmd
     data_mount = _detect_data_mount(ctx.workdir)
-    run_res = sandbox.run_command(image_tag, main_cmd, ctx.workdir, data_mount=data_mount)
+    zero_touch_dir = _copy_sandbox_subworkspace(ctx.workdir, "zero_touch_workspace")
+    run_res = sandbox.run_command(image_tag, main_cmd, zero_touch_dir, data_mount=data_mount)
     ctx.extracted_claims["analysis_run_zero_touch"] = run_res
 
     if run_res.success:
         ctx.extracted_claims["analysis_run_effective"] = run_res
-        ctx.extracted_claims["analysis_workdir"] = ctx.workdir
-        _maybe_run_multiseed(ctx, sandbox, image_tag, main_cmd, ctx.workdir, data_mount)
+        ctx.extracted_claims["analysis_workdir"] = zero_touch_dir
+        _maybe_run_multiseed(ctx, sandbox, image_tag, main_cmd, zero_touch_dir, data_mount)
         return GateResult(
             gate_id="G4.4_ANALYSIS_EXECUTES_ZERO_TOUCH",
             status=GateStatus.PASS,

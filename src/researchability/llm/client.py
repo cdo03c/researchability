@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import sqlite3
 import time
@@ -16,6 +17,7 @@ from typing import Any, TypeVar
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
+logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
@@ -54,13 +56,19 @@ class GeminiConfig:
         if load_dotenv_file:
             load_dotenv()
         cache_dir = Path(os.getenv("RESEARCHABILITY_CACHE_DIR", ".researchability_cache"))
+        raw_interval = os.getenv("RESEARCHABILITY_MIN_INTERVAL_SEC", "0.0")
+        try:
+            min_interval = max(0.0, float(raw_interval))
+        except ValueError as exc:
+            msg = f"Invalid RESEARCHABILITY_MIN_INTERVAL_SEC value: {raw_interval!r}"
+            raise ValueError(msg) from exc
         return cls(
             api_key=os.getenv("GEMINI_API_KEY"),
             fast_model=os.getenv("RESEARCHABILITY_FAST_MODEL", "gemini-3.5-flash"),
             reasoning_model=os.getenv("RESEARCHABILITY_REASONING_MODEL", "gemini-3.5-flash"),
             temperature=0.0,
             cache_path=cache_dir / "llm_cache.sqlite",
-            min_request_interval_sec=float(os.getenv("RESEARCHABILITY_MIN_INTERVAL_SEC", "0.0")),
+            min_request_interval_sec=min_interval,
         )
 
     def model_for_tier(self, tier: ModelTier) -> str:
@@ -93,6 +101,7 @@ class ResponseCache:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS llm_responses (
@@ -110,7 +119,7 @@ class ResponseCache:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         try:
             with conn:
                 yield conn
@@ -125,11 +134,23 @@ class ResponseCache:
         model_id: str,
         prompt_text: str,
         system_instruction: str = "",
+        schema_name: str = "",
+        temperature: float = 0.0,
     ) -> tuple[str, str]:
         """Compute deterministic (cache_key, input_hash) tuple."""
         payload = f"{system_instruction}\n---\n{prompt_text}".encode()
         input_hash = hashlib.sha256(payload).hexdigest()
-        composite = "|".join([paper_id, gate_id, prompt_version, model_id, input_hash])
+        composite = "|".join(
+            [
+                paper_id,
+                gate_id,
+                prompt_version,
+                model_id,
+                schema_name,
+                f"{temperature:.4f}",
+                input_hash,
+            ]
+        )
         cache_key = hashlib.sha256(composite.encode("utf-8")).hexdigest()
         return cache_key, input_hash
 
@@ -299,20 +320,31 @@ class GeminiClient:
             model_id=model_id,
             prompt_text=prompt,
             system_instruction=system_instruction,
+            schema_name=schema_cls.__name__,
+            temperature=self.config.temperature,
         )
 
         if use_cache:
             cached_json = self.cache.get(cache_key)
             if cached_json is not None:
-                parsed = schema_cls.model_validate_json(cached_json)
-                return parsed, CacheMetadata(
-                    cache_key=cache_key,
-                    paper_id=paper_id,
-                    gate_id=gate_id,
-                    prompt_version=prompt_version,
-                    model_id=model_id,
-                    from_cache=True,
-                )
+                try:
+                    parsed = schema_cls.model_validate_json(cached_json)
+                    return parsed, CacheMetadata(
+                        cache_key=cache_key,
+                        paper_id=paper_id,
+                        gate_id=gate_id,
+                        prompt_version=prompt_version,
+                        model_id=model_id,
+                        from_cache=True,
+                    )
+                except Exception as exc:
+                    # Treat corrupted or schema-drifted cache rows as a miss
+                    logger.warning(
+                        "Ignoring unreadable cached LLM response for %s/%s: %s",
+                        paper_id,
+                        gate_id,
+                        exc,
+                    )
 
         self._respect_rate_limit()
         caller = self._transport or self._default_transport

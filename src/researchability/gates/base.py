@@ -9,8 +9,19 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from researchability.llm.client import GeminiClient, ModelTier
-from researchability.models import EvidenceItem, GateResult, GateStatus, PaperBundle
+from researchability.llm.client import (
+    GeminiApiError,
+    GeminiClient,
+    MissingApiKeyError,
+    ModelTier,
+)
+from researchability.models import (
+    EvidenceItem,
+    FieldProfile,
+    GateResult,
+    GateStatus,
+    PaperBundle,
+)
 
 
 class LLMGateVerdict(BaseModel):
@@ -26,12 +37,18 @@ class LLMGateVerdict(BaseModel):
 
 @dataclass
 class EvaluationContext:
-    """Shared state passed across Stage 0-3 gate evaluators for one paper."""
+    """Shared state passed across Stage 0-5 gate evaluators for one paper."""
 
     paper: PaperBundle
     workdir: Path | None = None
     llm: GeminiClient | None = None
+    profile: FieldProfile | None = None
     extracted_claims: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def effective_profile(self) -> FieldProfile:
+        """Return the active field profile for evaluation, falling back to paper.primary_profile."""
+        return self.profile or self.paper.primary_profile
 
     def candidate_roots(self) -> list[Path]:
         """Return existing local directories holding artifacts for this paper."""
@@ -115,18 +132,34 @@ def run_llm_gate(
             rationale="Gemini client not configured and no deterministic fallback provided.",
         )
 
-    verdict, meta = ctx.llm.generate_structured(
-        paper_id=ctx.paper.paper_id,
-        gate_id=gate_id,
-        prompt=prompt,
-        schema_cls=LLMGateVerdict,
-        prompt_version=prompt_version,
-        tier=tier,
-        system_instruction=(
-            "You are a strict scientific reproducibility auditor. Return PASS only when "
-            "explicit evidence is present in the provided text; cite exact excerpts."
-        ),
-    )
+    try:
+        verdict, meta = ctx.llm.generate_structured(
+            paper_id=ctx.paper.paper_id,
+            gate_id=gate_id,
+            prompt=prompt,
+            schema_cls=LLMGateVerdict,
+            prompt_version=prompt_version,
+            tier=tier,
+            system_instruction=(
+                "You are a strict scientific reproducibility auditor. Return PASS only when "
+                "explicit evidence is present in the provided text; cite exact excerpts."
+            ),
+        )
+    except (GeminiApiError, MissingApiKeyError) as exc:
+        if fallback is not None:
+            fb_res = fallback(ctx)
+            return fb_res.model_copy(
+                update={
+                    "flags": [*fb_res.flags, "LLM_FALLBACK_USED"],
+                    "rationale": f"{fb_res.rationale} (LLM fallback after error: {exc})",
+                }
+            )
+        return GateResult(
+            gate_id=gate_id,
+            status=GateStatus.N_A,
+            rationale=f"LLM evaluation unavailable for {gate_id}: {exc}",
+            flags=["LLM_CALL_FAILED"],
+        )
     evidence = (
         [EvidenceItem(source=verdict.evidence_source, excerpt=verdict.evidence_excerpt)]
         if verdict.evidence_excerpt

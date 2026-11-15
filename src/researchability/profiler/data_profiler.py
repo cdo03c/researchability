@@ -15,10 +15,12 @@ from pydantic import BaseModel, Field
 _MISSING_TOKENS = {"", "na", "n/a", "nan", "null", "none", "."}
 _STRONG_SENTINELS = {-9999, -999, -99, -98, -88, 9999}
 _SMALL_NEG_SENTINELS = {-1, -2, -3, -8, -9}
+_MAX_PROFILE_ROWS = 250_000
+_MAX_JSON_PROFILE_BYTES = 25 * 1024 * 1024
+_MAX_JSONL_LINES = 50_000
 _PII_HEADER_RE = re.compile(
     r"^(?:e?_?mail|email_address|ip|ip_addr(?:ess)?|phone|telephone|mobile|ssn|"
-    r"social_security|full_?name|first_?name|last_?name|home_address|"
-    r"latitude|longitude|geo_?lat|geo_?lon)$",
+    r"social_security|full_?name|first_?name|last_?name|home_address)$",
     re.IGNORECASE,
 )
 _EMAIL_VAL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
@@ -127,6 +129,8 @@ def _profile_delimited(path: Path, delimiter: str, compressed: bool) -> DataFile
             for row in reader:
                 if not row:
                     continue
+                if row_count >= _MAX_PROFILE_ROWS:
+                    break
                 row_count += 1
                 for idx in range(min(len(row), n_cols)):
                     val_str = row[idx].strip()
@@ -225,9 +229,16 @@ def _scan_json_records_for_pii(records: list[Any], cols: list[str]) -> list[str]
 def _profile_json(path: Path, jsonl: bool) -> DataFileProfile:
     fmt = "jsonl" if jsonl else "json"
     try:
-        raw_text = path.read_text(encoding="utf-8")
         if jsonl:
-            records = [json.loads(line) for line in raw_text.splitlines() if line.strip()]
+            records: list[Any] = []
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    records.append(json.loads(stripped))
+                    if len(records) >= _MAX_JSONL_LINES:
+                        break
             cols = sorted(
                 {k for r in records[:50] if isinstance(r, dict) for k in r},
             )
@@ -240,6 +251,15 @@ def _profile_json(path: Path, jsonl: bool) -> DataFileProfile:
                 columns=cols,
                 pii_findings=_scan_json_records_for_pii(records, cols),
             )
+        file_size = path.stat().st_size
+        if file_size > _MAX_JSON_PROFILE_BYTES:
+            return DataFileProfile(
+                path=str(path),
+                format=fmt,
+                parseable=False,
+                parse_error=f"JSON file exceeds {_MAX_JSON_PROFILE_BYTES} byte profiling cap",
+            )
+        raw_text = path.read_text(encoding="utf-8")
         parsed: Any = json.loads(raw_text)
         if isinstance(parsed, list):
             cols = sorted({k for r in parsed[:50] if isinstance(r, dict) for k in r})

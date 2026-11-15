@@ -5,10 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
+import tomllib
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
 
+import yaml
 from pydantic import BaseModel, Field
 
 _PLAIN_TEXT_README_EXTS = {".md", ".markdown", ".txt", ".rst", ""}
@@ -114,62 +117,7 @@ _R_GITHUB_RE = re.compile(
 )
 _STATA_SSC_RE = re.compile(r"^\s*ssc\s+install\s+([A-Za-z0-9_]+)", re.IGNORECASE | re.MULTILINE)
 
-_PYTHON_STDLIB = {
-    "abc",
-    "argparse",
-    "ast",
-    "collections",
-    "concurrent",
-    "contextlib",
-    "copy",
-    "csv",
-    "dataclasses",
-    "datetime",
-    "decimal",
-    "difflib",
-    "enum",
-    "functools",
-    "glob",
-    "gzip",
-    "hashlib",
-    "hmac",
-    "http",
-    "importlib",
-    "inspect",
-    "io",
-    "itertools",
-    "json",
-    "logging",
-    "math",
-    "multiprocessing",
-    "operator",
-    "os",
-    "pathlib",
-    "pickle",
-    "platform",
-    "pprint",
-    "random",
-    "re",
-    "shutil",
-    "signal",
-    "sqlite3",
-    "statistics",
-    "string",
-    "struct",
-    "subprocess",
-    "sys",
-    "tempfile",
-    "textwrap",
-    "threading",
-    "time",
-    "traceback",
-    "typing",
-    "unittest",
-    "urllib",
-    "uuid",
-    "warnings",
-    "zipfile",
-}
+_PYTHON_STDLIB = frozenset(m.lower() for m in sys.stdlib_module_names)
 _R_BASE_PACKAGES = {
     "base",
     "compiler",
@@ -439,28 +387,86 @@ def audit_script_paths(
     )
 
 
+def _record_pkg_name(declared: set[str], raw_name: str) -> None:
+    cleaned = raw_name.strip().split("::")[-1].strip("'\"")
+    match = re.match(r"^([A-Za-z0-9_.-]+)", cleaned)
+    if not match:
+        return
+    name = match.group(1).lower()
+    if name in {"python", "pip", "conda"}:
+        return
+    declared.add(name)
+    declared.add(name.replace("-", "_"))
+
+
 def _extract_declared_packages(manifest_texts: dict[str, str]) -> set[str]:
     declared: set[str] = set()
     for path, body in manifest_texts.items():
         name = Path(path).name.lower()
+        if name == "dockerfile":
+            continue
         if name == "renv.lock":
             try:
                 data = json.loads(body)
                 pkgs = data.get("Packages", {})
                 if isinstance(pkgs, dict):
-                    declared.update(k.lower() for k in pkgs)
+                    for pkg_name in pkgs:
+                        _record_pkg_name(declared, str(pkg_name))
                     continue
             except json.JSONDecodeError:
                 pass
+        elif name == "pyproject.toml":
+            try:
+                toml_data = tomllib.loads(body)
+                project = toml_data.get("project", {})
+                if isinstance(project, dict):
+                    for dep in project.get("dependencies", []) or []:
+                        if isinstance(dep, str):
+                            _record_pkg_name(declared, dep)
+                    opt = project.get("optional-dependencies", {}) or {}
+                    if isinstance(opt, dict):
+                        for group_deps in opt.values():
+                            if isinstance(group_deps, list):
+                                for dep in group_deps:
+                                    if isinstance(dep, str):
+                                        _record_pkg_name(declared, dep)
+                poetry = toml_data.get("tool", {}).get("poetry", {})
+                if isinstance(poetry, dict):
+                    for pkg_name in poetry.get("dependencies", {}) or {}:
+                        _record_pkg_name(declared, str(pkg_name))
+                    for group in (poetry.get("group", {}) or {}).values():
+                        if isinstance(group, dict):
+                            for pkg_name in group.get("dependencies", {}) or {}:
+                                _record_pkg_name(declared, str(pkg_name))
+                continue
+            except tomllib.TOMLDecodeError:
+                pass
+        elif name in {"environment.yml", "environment.yaml", "conda.yml"}:
+            try:
+                yml_data = yaml.safe_load(body)
+                if isinstance(yml_data, dict):
+                    for entry in yml_data.get("dependencies", []) or []:
+                        if isinstance(entry, str):
+                            _record_pkg_name(declared, entry)
+                        elif isinstance(entry, dict):
+                            for pip_dep in entry.get("pip", []) or []:
+                                if isinstance(pip_dep, str):
+                                    _record_pkg_name(declared, pip_dep)
+                    continue
+            except yaml.YAMLError:
+                pass
+        elif name in {"poetry.lock", "uv.lock"}:
+            for m in re.finditer(r'^\s*name\s*=\s*"([^"]+)"', body, re.MULTILINE):
+                _record_pkg_name(declared, m.group(1))
+            continue
+
         for raw_line in body.splitlines():
             line = raw_line.split("#", 1)[0].strip()
-            if not line or line.startswith(("[", "-", "dependencies:", "channels:")):
+            if not line or line.startswith(("[", "dependencies:", "channels:", "-r", "--")):
                 continue
-            pkg_match = re.match(r"^['\"]?([A-Za-z0-9_.-]+)", line)
-            if pkg_match:
-                pkg = pkg_match.group(1).lower().replace("-", "_")
-                declared.add(pkg)
-                declared.add(pkg_match.group(1).lower())
+            if line.startswith("- "):
+                line = line[2:].strip()
+            _record_pkg_name(declared, line)
     return declared
 
 

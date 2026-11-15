@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import time
@@ -11,13 +12,17 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from researchability.connectors import ArtifactResolver, ArxivConnector, DataverseConnector
-from researchability.gates import evaluate_stage0_to_3, evaluate_stage0_to_5
+from researchability.gates import (
+    evaluate_stage0_to_3,
+    evaluate_stage0_to_5_with_context,
+)
 from researchability.llm import GeminiClient
 from researchability.models import AuditReport, PaperBundle
 from researchability.registry import GateRegistry
 from researchability.sandbox import DockerSandboxRunner, SandboxConfig
 from researchability.storage import AnalyticsSummary, ResearchabilityStore
 
+logger = logging.getLogger(__name__)
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -26,6 +31,7 @@ class BatchConfig(BaseModel):
 
     db_path: Path = Path("results/researchability.duckdb")
     parquet_dir: Path | None = Path("results/parquet")
+    dossier_dir: Path | None = None
     workspace_root: Path = Path(".researchability_batch_workspaces")
     min_interval_seconds: float = Field(default=0.0, ge=0.0)
     cleanup_workspaces: bool = True
@@ -60,6 +66,19 @@ def _sanitize_dirname(raw_id: str) -> str:
     return _SAFE_ID_RE.sub("_", raw_id).strip("_") or "paper"
 
 
+def _candidate_paper_ids(raw_id: str) -> set[str]:
+    bare_id = raw_id.split(":", maxsplit=1)[1] if ":" in raw_id else raw_id
+    return {
+        raw_id,
+        bare_id,
+        f"arxiv:{bare_id}",
+        f"arxiv:{raw_id}",
+        f"doi:{bare_id}",
+        f"dataverse:{bare_id}",
+        f"dataverse:{raw_id}",
+    }
+
+
 class BatchSweepRunner:
     """Orchestrates resumable batch ingestion, isolated scoring, cleanup, and Parquet export."""
 
@@ -81,11 +100,23 @@ class BatchSweepRunner:
         self._arxiv = arxiv
         self._dataverse = dataverse
         self._resolver = resolver
+        self._owns_llm = llm is None and self.config.use_llm
         self._llm = llm if llm is not None else (GeminiClient() if self.config.use_llm else None)
         self._sandbox = sandbox or DockerSandboxRunner(
             SandboxConfig(timeout_seconds=self.config.sandbox_timeout_seconds)
         )
         self._last_step_ts = 0.0
+
+    def close(self) -> None:
+        """Release runner-owned resources."""
+        if self._owns_llm and self._llm is not None and hasattr(self._llm, "close"):
+            self._llm.close()
+
+    def __enter__(self) -> BatchSweepRunner:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
 
     def _pace(self) -> None:
         if self.config.min_interval_seconds <= 0:
@@ -98,13 +129,19 @@ class BatchSweepRunner:
 
     def _evaluate_one(self, paper: PaperBundle, workdir: Path | None) -> AuditReport:
         if self.config.execute:
-            return evaluate_stage0_to_5(
+            report, ctx = evaluate_stage0_to_5_with_context(
                 paper=paper,
                 registry=self.registry,
                 workdir=workdir,
                 llm=self._llm,
                 sandbox=self._sandbox,
             )
+            dossier_md = ctx.extracted_claims.get("human_dossier_markdown")
+            if isinstance(dossier_md, str) and dossier_md and self.config.dossier_dir is not None:
+                self.config.dossier_dir.mkdir(parents=True, exist_ok=True)
+                out_path = self.config.dossier_dir / f"{_sanitize_dirname(paper.paper_id)}.md"
+                out_path.write_text(dossier_md, encoding="utf-8")
+            return report
         return evaluate_stage0_to_3(
             paper=paper,
             registry=self.registry,
@@ -151,7 +188,7 @@ class BatchSweepRunner:
         failed_ids: list[str] = []
 
         for paper in papers:
-            if paper.paper_id in completed:
+            if _candidate_paper_ids(paper.paper_id) & completed:
                 skipped += 1
                 continue
             self._pace()
@@ -162,6 +199,7 @@ class BatchSweepRunner:
                 self.store.save_audit(paper, report, registry=self.registry)
                 succeeded += 1
             except Exception as exc:
+                logger.exception("Batch bundle evaluation failed for %s", paper.paper_id)
                 self.store.record_failure(paper.paper_id, paper.source_repo, str(exc))
                 failed_ids.append(paper.paper_id)
 
@@ -191,16 +229,7 @@ class BatchSweepRunner:
         try:
             self.config.workspace_root.mkdir(parents=True, exist_ok=True)
             for target in targets:
-                raw_id = target.paper_id
-                bare_id = raw_id.split(":", maxsplit=1)[1] if ":" in raw_id else raw_id
-                canonical_candidates = {
-                    raw_id,
-                    bare_id,
-                    f"arxiv:{bare_id}",
-                    f"doi:{bare_id}",
-                    f"dataverse:{bare_id}",
-                }
-                if canonical_candidates & completed:
+                if _candidate_paper_ids(target.paper_id) & completed:
                     skipped += 1
                     continue
 
@@ -224,6 +253,7 @@ class BatchSweepRunner:
                     self.store.save_audit(paper, report, registry=self.registry)
                     succeeded += 1
                 except Exception as exc:
+                    logger.exception("Batch target sweep failed for %s", target.paper_id)
                     self.store.record_failure(target.paper_id, target.source_repo, str(exc))
                     failed_ids.append(target.paper_id)
                 finally:

@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from researchability.gates.base import EvaluationContext
-from researchability.llm.client import ModelTier
+from researchability.llm.client import GeminiApiError, MissingApiKeyError, ModelTier
 from researchability.models import (
     AuditReport,
     EvidenceItem,
@@ -356,32 +356,42 @@ def compare_numeric_outcomes(
     rel_tol: float = _DEFAULT_REL_TOL,
 ) -> list[NumericComparison]:
     """Match paper-reported claims to sandbox metrics and compute deltas."""
-    by_norm: dict[str, ReproducedMetric] = {}
+    by_norm: dict[str, list[ReproducedMetric]] = {}
     for item in reproduced:
-        by_norm.setdefault(item.normalized_name, item)
+        by_norm.setdefault(item.normalized_name, []).append(item)
 
     comparisons: list[NumericComparison] = []
     for claim in reported:
-        target = by_norm.get(claim.normalized_name)
-        if target is None:
-            # Partial substring match if unambiguous
-            matches = [
-                item
-                for norm_k, item in by_norm.items()
+        candidates = list(by_norm.get(claim.normalized_name, []))
+        if not candidates:
+            # Partial substring match across distinct normalized keys if unambiguous
+            matching_keys = [
+                norm_k
+                for norm_k in by_norm
                 if claim.normalized_name in norm_k or norm_k in claim.normalized_name
             ]
-            if len(matches) == 1:
-                target = matches[0]
-        if target is None:
+            if len(matching_keys) == 1:
+                candidates = list(by_norm[matching_keys[0]])
+        if not candidates:
             continue
 
-        matched, effective_rep, abs_d, rel_d = _values_match(
-            claim.value,
-            target.value,
-            is_percent=claim.is_percent,
-            abs_tol=abs_tol,
-            rel_tol=rel_tol,
+        best_eval = min(
+            (
+                (
+                    _values_match(
+                        claim.value,
+                        cand.value,
+                        is_percent=claim.is_percent,
+                        abs_tol=abs_tol,
+                        rel_tol=rel_tol,
+                    ),
+                    cand,
+                )
+                for cand in candidates
+            ),
+            key=lambda pair: (0 if pair[0][0] else 1, pair[0][2]),
         )
+        (matched, effective_rep, abs_d, rel_d), target = best_eval
         comparisons.append(
             NumericComparison(
                 metric_name=claim.name,
@@ -708,7 +718,7 @@ def _suggest_robustness_checks(
             "Perform specification-curve / alternative covariate and cluster-robust SE checks."
         )
 
-    if any(g.gate_id == "G3.5_SENSITIVITY_ANALYSIS" for g in failed_gates):
+    if any(g.gate_id == "G3.5_MULTIPLE_TESTING_CONTROLLED" for g in failed_gates):
         checks.append(
             "Add ablation or robustness checks across key hyperparameters and exclusion rules."
         )
@@ -951,26 +961,29 @@ def eval_g5_3_human_dossier_ready(ctx: EvaluationContext) -> GateResult:
 
     all_flags = sorted({*(flag for res in prelim_results for flag in res.flags), *qrob.flags})
     failed = [res for res in prelim_results if res.status == GateStatus.FAIL]
-    checks = _suggest_robustness_checks(ctx.paper.primary_profile, all_flags, failed)
+    checks = _suggest_robustness_checks(ctx.effective_profile, all_flags, failed)
 
     if ctx.llm is not None:
         flag_summary = ", ".join(all_flags) or "none"
         prompt = (
             "Propose 3 concise, high-leverage robustness checks for human peer debate.\n"
             f"Title: {ctx.paper.title}\n"
-            f"Profile: {ctx.paper.primary_profile.value}\n"
+            f"Profile: {ctx.effective_profile.value}\n"
             f"Flags: {flag_summary}\n"
         )
-        llm_checks, _ = ctx.llm.generate_structured(
-            paper_id=ctx.paper.paper_id,
-            gate_id="G5.3_HUMAN_DOSSIER_READY",
-            prompt=prompt,
-            schema_cls=_LLMRobustnessChecklist,
-            tier=ModelTier.FAST,
-        )
-        for item in llm_checks.checks:
-            if item.strip() and item.strip() not in checks:
-                checks.append(item.strip())
+        try:
+            llm_checks, _ = ctx.llm.generate_structured(
+                paper_id=ctx.paper.paper_id,
+                gate_id="G5.3_HUMAN_DOSSIER_READY",
+                prompt=prompt,
+                schema_cls=_LLMRobustnessChecklist,
+                tier=ModelTier.FAST,
+            )
+            for item in llm_checks.checks:
+                if item.strip() and item.strip() not in checks:
+                    checks.append(item.strip())
+        except (GeminiApiError, MissingApiKeyError):
+            pass
 
     # Build temporary summary data for dossier preview when full AuditReport isn't passed yet
     comparisons: list[NumericComparison] = ctx.extracted_claims.get("numeric_comparisons", [])
@@ -980,6 +993,16 @@ def eval_g5_3_human_dossier_ready(ctx: EvaluationContext) -> GateResult:
 
     # Construct lightweight report skeleton if not already provided
     prelim_report: AuditReport | None = ctx.extracted_claims.get("preliminary_report")
+    if prelim_report is None and prelim_results:
+        from researchability.registry import GateRegistry
+        from researchability.scoring import compute_audit_report
+
+        prelim_report = compute_audit_report(
+            paper=ctx.paper,
+            registry=GateRegistry.from_yaml(),
+            raw_results={r.gate_id: r for r in prelim_results},
+            profile=ctx.effective_profile,
+        )
     if prelim_report is not None:
         ctx.extracted_claims["human_dossier_markdown"] = render_human_dossier(
             prelim_report,

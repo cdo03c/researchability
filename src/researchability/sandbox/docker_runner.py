@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
+import shlex
 import subprocess
+import threading
 import time
 from pathlib import Path
-from typing import Protocol
+from typing import IO, Protocol
 
 from pydantic import BaseModel, Field
 
 from researchability.models import EvidenceItem, GateStatus, PaperBundle
+
+logger = logging.getLogger(__name__)
 
 _GPU_HARD_REQUIREMENT_RE = re.compile(
     r"(?:\.cuda\s*\(|torch\.device\s*\(\s*['\"]cuda|"
@@ -37,6 +42,9 @@ class SandboxConfig(BaseModel):
     memory_limit: str = "4g"
     timeout_seconds: int = Field(default=300, ge=1)
     max_data_bytes: int = Field(default=2 * 1024 * 1024 * 1024, ge=1)
+    pids_limit: int = Field(default=256, ge=1)
+    allow_repo_dockerfile: bool = False
+    cleanup_images: bool = True
     docker_bin: str = "docker"
     python_image: str = "python:3.11-slim"
     r_image: str = "rocker/r-ver:4.4.1"
@@ -101,6 +109,28 @@ class SandboxRunResult(BaseModel):
     output_previews: dict[str, str] = Field(default_factory=dict)
 
 
+_MAX_CAPTURE_BYTES = 200_000
+_MAX_CAPTURE_CHARS = 50_000
+
+
+def _drain_stream(stream: IO[bytes] | None, limit_bytes: int, out: list[bytes]) -> None:
+    """Read stream chunks up to limit_bytes in memory while draining remaining bytes."""
+    if stream is None:
+        return
+    collected = 0
+    try:
+        while True:
+            chunk = stream.read(8192)
+            if not chunk:
+                break
+            if collected < limit_bytes:
+                take = min(len(chunk), limit_bytes - collected)
+                out.append(chunk[:take])
+                collected += take
+    finally:
+        stream.close()
+
+
 def default_subprocess_runner(
     args: list[str],
     *,
@@ -110,40 +140,11 @@ def default_subprocess_runner(
     """Execute a subprocess with hard timeout and bounded stdout/stderr capture."""
     started = time.monotonic()
     try:
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             args,
             cwd=str(cwd) if cwd is not None else None,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        return CommandResult(
-            returncode=completed.returncode,
-            stdout=completed.stdout[:50_000],
-            stderr=completed.stderr[:50_000],
-            timed_out=False,
-            duration_seconds=round(time.monotonic() - started, 3),
-            command=list(args),
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout_val = (
-            exc.stdout.decode("utf-8", errors="replace")
-            if isinstance(exc.stdout, bytes)
-            else (exc.stdout or "")
-        )
-        stderr_val = (
-            exc.stderr.decode("utf-8", errors="replace")
-            if isinstance(exc.stderr, bytes)
-            else (exc.stderr or "")
-        )
-        return CommandResult(
-            returncode=124,
-            stdout=stdout_val[:50_000],
-            stderr=f"Command timed out after {timeout}s.\n{stderr_val}"[:50_000],
-            timed_out=True,
-            duration_seconds=round(time.monotonic() - started, 3),
-            command=list(args),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
     except FileNotFoundError as exc:
         return CommandResult(
@@ -154,6 +155,48 @@ def default_subprocess_runner(
             duration_seconds=round(time.monotonic() - started, 3),
             command=list(args),
         )
+
+    out_chunks: list[bytes] = []
+    err_chunks: list[bytes] = []
+    t_out = threading.Thread(
+        target=_drain_stream, args=(proc.stdout, _MAX_CAPTURE_BYTES, out_chunks)
+    )
+    t_err = threading.Thread(
+        target=_drain_stream, args=(proc.stderr, _MAX_CAPTURE_BYTES, err_chunks)
+    )
+    t_out.start()
+    t_err.start()
+
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.kill()
+        proc.wait()
+    finally:
+        t_out.join(timeout=2.0)
+        t_err.join(timeout=2.0)
+
+    stdout_val = b"".join(out_chunks).decode("utf-8", errors="replace")[:_MAX_CAPTURE_CHARS]
+    stderr_val = b"".join(err_chunks).decode("utf-8", errors="replace")
+    if timed_out:
+        return CommandResult(
+            returncode=124,
+            stdout=stdout_val,
+            stderr=f"Command timed out after {timeout}s.\n{stderr_val}"[:_MAX_CAPTURE_CHARS],
+            timed_out=True,
+            duration_seconds=round(time.monotonic() - started, 3),
+            command=list(args),
+        )
+    return CommandResult(
+        returncode=proc.returncode,
+        stdout=stdout_val,
+        stderr=stderr_val[:_MAX_CAPTURE_CHARS],
+        timed_out=False,
+        duration_seconds=round(time.monotonic() - started, 3),
+        command=list(args),
+    )
 
 
 def _iter_workspace_files(root: Path | None) -> list[Path]:
@@ -374,11 +417,12 @@ class DockerSandboxRunner:
         return f"researchability-sandbox:{digest}"
 
     def _find_manifest(self, workdir: Path, filename: str) -> Path | None:
+        root_resolved = workdir.resolve()
         direct = workdir / filename
-        if direct.is_file():
+        if direct.is_file() and direct.resolve().is_relative_to(root_resolved):
             return direct
         for candidate in _iter_workspace_files(workdir):
-            if candidate.name == filename:
+            if candidate.name == filename and candidate.resolve().is_relative_to(root_resolved):
                 return candidate
         return None
 
@@ -387,6 +431,14 @@ class DockerSandboxRunner:
         language = detect_primary_language(paper, workdir)
         req_file = self._find_manifest(workdir, "requirements.txt")
         pyproject_file = self._find_manifest(workdir, "pyproject.toml")
+        uv_lock = self._find_manifest(workdir, "uv.lock")
+        poetry_lock = self._find_manifest(workdir, "poetry.lock")
+        pipfile = self._find_manifest(workdir, "Pipfile")
+        env_yml = (
+            self._find_manifest(workdir, "environment.yml")
+            or self._find_manifest(workdir, "environment.yaml")
+            or self._find_manifest(workdir, "conda.yml")
+        )
         renv_file = self._find_manifest(workdir, "renv.lock")
 
         if language == "r" or renv_file is not None:
@@ -396,13 +448,32 @@ class DockerSandboxRunner:
                 "COPY . /workspace",
             ]
             if renv_file is not None:
-                rel_renv = renv_file.relative_to(workdir)
+                rel_renv = renv_file.relative_to(workdir).as_posix()
+                escaped_renv = rel_renv.replace("\\", "\\\\").replace("'", "\\'")
                 lines.append(
                     "RUN Rscript -e \"install.packages('renv', "
-                    f"repos='https://cloud.r-project.org'); "
-                    f"renv::restore(lockfile='{rel_renv}', prompt=FALSE)\""
+                    "repos='https://cloud.r-project.org'); "
+                    f"renv::restore(lockfile='{escaped_renv}', prompt=FALSE)\""
                 )
             lines.append("USER 65534:65534")
+            return "\n".join(lines) + "\n"
+
+        if (
+            env_yml is not None
+            and req_file is None
+            and pyproject_file is None
+            and uv_lock is None
+            and poetry_lock is None
+            and pipfile is None
+        ):
+            rel_env = shlex.quote(env_yml.relative_to(workdir).as_posix())
+            lines = [
+                "FROM condaforge/miniforge3:latest",
+                "WORKDIR /workspace",
+                "COPY . /workspace",
+                f"RUN mamba env update -n base -f {rel_env} && conda clean -afy",
+                "USER 65534:65534",
+            ]
             return "\n".join(lines) + "\n"
 
         lines = [
@@ -412,20 +483,29 @@ class DockerSandboxRunner:
             "COPY . /workspace",
         ]
         if req_file is not None:
-            rel_req = req_file.relative_to(workdir)
+            rel_req = shlex.quote(req_file.relative_to(workdir).as_posix())
             lines.append(f"RUN pip install --no-cache-dir -r {rel_req}")
+        elif uv_lock is not None:
+            lines.append("RUN pip install --no-cache-dir uv && uv sync --frozen --no-dev")
+        elif poetry_lock is not None:
+            lines.append(
+                "RUN pip install --no-cache-dir poetry && "
+                "poetry config virtualenvs.create false && poetry install --no-interaction"
+            )
+        elif pipfile is not None:
+            lines.append("RUN pip install --no-cache-dir pipenv && pipenv install --system")
         elif pyproject_file is not None:
             lines.append("RUN pip install --no-cache-dir .")
         lines.append("USER 65534:65534")
         return "\n".join(lines) + "\n"
 
     def build_environment(self, paper: PaperBundle, workdir: Path) -> SandboxBuildResult:
-        """Build container environment from existing Dockerfile or generated manifest image."""
+        """Build container environment from generated manifest image or opted-in Dockerfile."""
         tag = self.image_tag_for(paper)
         language = detect_primary_language(paper, workdir)
         existing_dockerfile = self._find_manifest(workdir, "Dockerfile")
 
-        if existing_dockerfile is not None:
+        if existing_dockerfile is not None and self.config.allow_repo_dockerfile:
             dockerfile_rel = str(existing_dockerfile.relative_to(workdir))
             cmd = [
                 self.config.docker_bin,
@@ -485,6 +565,9 @@ class DockerSandboxRunner:
             "--rm",
             f"--cpus={self.config.cpu_limit}",
             f"--memory={self.config.memory_limit}",
+            f"--pids-limit={self.config.pids_limit}",
+            "--ipc=none",
+            "--ulimit=nofile=1024:1024",
             "--cap-drop=ALL",
             "--security-opt=no-new-privileges:true",
             f"--user={self.config.non_root_user}",
@@ -544,3 +627,19 @@ class DockerSandboxRunner:
             modified_files=modified,
             output_previews=previews,
         )
+
+    def cleanup_image(self, image_tag: str) -> bool:
+        """Remove a temporary sandbox image when cleanup_images is enabled."""
+        if not self.config.cleanup_images or not image_tag:
+            return False
+        res = self._run(
+            [self.config.docker_bin, "rmi", "-f", image_tag],
+            cwd=None,
+            timeout=30,
+        )
+        ok = res.returncode == 0 and not res.timed_out
+        if ok:
+            logger.debug("Removed temporary sandbox image %s", image_tag)
+        else:
+            logger.warning("Failed to remove sandbox image %s: %s", image_tag, res.stderr[:200])
+        return ok
