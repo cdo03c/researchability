@@ -8,6 +8,12 @@ from typing import Annotated
 
 import typer
 
+from researchability.batch import BatchConfig, BatchSweepRunner, BatchTarget
+from researchability.calibration import (
+    evaluate_calibration,
+    load_calibration_dataset,
+    render_calibration_markdown,
+)
 from researchability.connectors import ArtifactResolver, ArxivConnector, DataverseConnector
 from researchability.gates import (
     evaluate_stage0_to_3,
@@ -19,6 +25,7 @@ from researchability.models import AuditReport, FieldProfile, GateResult, PaperB
 from researchability.registry import GateRegistry
 from researchability.sandbox import SandboxConfig
 from researchability.scoring import compute_audit_report, render_markdown_summary
+from researchability.storage import ResearchabilityStore, render_analytics_markdown
 
 app = typer.Typer(
     name="researchability",
@@ -265,12 +272,175 @@ def audit(
 def batch(
     source: Annotated[
         str,
-        typer.Option("--source", help="Repository source (arxiv | dataverse)."),
+        typer.Option("--source", help="Source mode: arxiv | dataverse | bundles."),
     ] = "arxiv",
+    query: Annotated[
+        str | None,
+        typer.Option("--query", "-q", help="Search query string for arxiv/dataverse."),
+    ] = None,
+    category: Annotated[
+        list[str] | None,
+        typer.Option("--category", "-C", help="arXiv category filter (repeatable)."),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", "-n", help="Maximum papers/datasets to queue."),
+    ] = 25,
+    bundles_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--bundles-dir", help="Directory of *.json PaperBundles (with --source bundles)."
+        ),
+    ] = None,
+    db_path: Annotated[
+        Path,
+        typer.Option("--db", help="DuckDB database path."),
+    ] = Path("results/researchability.duckdb"),
+    parquet_dir: Annotated[
+        Path | None,
+        typer.Option("--parquet-dir", help="Directory for partitioned Parquet export."),
+    ] = Path("results/parquet"),
+    interval: Annotated[
+        float,
+        typer.Option("--interval", help="Minimum seconds between consecutive items."),
+    ] = 0.0,
+    resume: Annotated[
+        bool,
+        typer.Option("--resume/--no-resume", help="Skip paper_ids already COMPLETED in DuckDB."),
+    ] = True,
+    execute: Annotated[
+        bool,
+        typer.Option("--execute/--no-execute", help="Run Stage 4-5 Docker sandbox execution."),
+    ] = False,
+    use_llm: Annotated[
+        bool,
+        typer.Option("--use-llm/--offline", help="Enable Gemini API verification."),
+    ] = False,
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Optional BatchRunSummary JSON path."),
+    ] = None,
+    markdown: Annotated[
+        Path | None,
+        typer.Option("--markdown", "-m", help="Optional analytics Markdown report path."),
+    ] = None,
 ) -> None:
-    """Run batch repository scoring (scheduled for Milestone 5)."""
-    typer.echo(f"Batch runner for source '{source}' will be implemented in Milestone 5 (TRE-102).")
-    raise typer.Exit(code=0)
+    """Run a resumable batch reproducibility sweep into DuckDB and partitioned Parquet."""
+    cfg = BatchConfig(
+        db_path=db_path,
+        parquet_dir=parquet_dir,
+        min_interval_seconds=interval,
+        resume=resume,
+        execute=execute,
+        use_llm=use_llm,
+    )
+    runner = BatchSweepRunner(config=cfg)
+
+    if source == "bundles":
+        if bundles_dir is None or not bundles_dir.is_dir():
+            typer.echo(
+                "--bundles-dir must be an existing directory when --source bundles", err=True
+            )
+            raise typer.Exit(code=2)
+        papers = [
+            PaperBundle.model_validate_json(p.read_text(encoding="utf-8"))
+            for p in sorted(bundles_dir.glob("*.json"))
+        ][:limit]
+        summary = runner.run_bundles(papers)
+    elif source == "arxiv":
+        targets: list[BatchTarget] = runner.discover_arxiv_targets(
+            query=query,
+            categories=category,
+            limit=limit,
+        )
+        summary = runner.sweep_targets(targets)
+    elif source == "dataverse":
+        targets = runner.discover_dataverse_targets(query=query or "*", limit=limit)
+        summary = runner.sweep_targets(targets)
+    else:
+        typer.echo(f"Unsupported --source '{source}'. Use arxiv, dataverse, or bundles.", err=True)
+        raise typer.Exit(code=2)
+
+    payload = summary.model_dump_json(indent=2)
+    if output:
+        output.write_text(payload + "\n", encoding="utf-8")
+        typer.echo(f"Wrote BatchRunSummary to {output}")
+    else:
+        typer.echo(payload)
+    if markdown:
+        markdown.write_text(render_analytics_markdown(summary.analytics), encoding="utf-8")
+        typer.echo(f"Wrote Analytics Markdown to {markdown}")
+
+
+@app.command()
+def analytics(
+    db_path: Annotated[
+        Path,
+        typer.Option("--db", help="DuckDB database path to query."),
+    ] = Path("results/researchability.duckdb"),
+    profile: Annotated[
+        FieldProfile | None,
+        typer.Option("--profile", "-p", help="Optional disciplinary profile filter."),
+    ] = None,
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Optional AnalyticsSummary JSON path."),
+    ] = None,
+    markdown: Annotated[
+        Path | None,
+        typer.Option("--markdown", "-m", help="Optional Markdown summary path."),
+    ] = None,
+) -> None:
+    """Query DuckDB longitudinal metrics (funnel drop-off, failures, and trends)."""
+    store = ResearchabilityStore(db_path)
+    summary = store.summary_report(profile=profile)
+    payload = summary.model_dump_json(indent=2)
+    if output:
+        output.write_text(payload + "\n", encoding="utf-8")
+        typer.echo(f"Wrote AnalyticsSummary to {output}")
+    else:
+        typer.echo(payload)
+    if markdown:
+        markdown.write_text(render_analytics_markdown(summary), encoding="utf-8")
+        typer.echo(f"Wrote Analytics Markdown to {markdown}")
+
+
+@app.command()
+def calibrate(
+    dataset_path: Annotated[
+        Path,
+        typer.Argument(exists=True, help="JSON or JSONL file of CalibrationSample items."),
+    ],
+    use_llm: Annotated[
+        bool,
+        typer.Option("--use-llm/--offline", help="Use Gemini API for LLM-assisted gates."),
+    ] = False,
+    execute: Annotated[
+        bool,
+        typer.Option("--execute/--no-execute", help="Include Stage 4-5 sandbox execution."),
+    ] = False,
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Optional CalibrationReport JSON path."),
+    ] = None,
+    markdown: Annotated[
+        Path | None,
+        typer.Option("--markdown", "-m", help="Optional calibration Markdown report path."),
+    ] = None,
+) -> None:
+    """Validate automated binary gates against human ground-truth audit labels."""
+    samples = load_calibration_dataset(dataset_path)
+    llm_client = GeminiClient() if use_llm else None
+    report_obj = evaluate_calibration(samples, llm=llm_client, execute=execute)
+    payload = report_obj.model_dump_json(indent=2)
+    if output:
+        output.write_text(payload + "\n", encoding="utf-8")
+        typer.echo(f"Wrote CalibrationReport to {output}")
+    else:
+        typer.echo(payload)
+    if markdown:
+        markdown.write_text(render_calibration_markdown(report_obj), encoding="utf-8")
+        typer.echo(f"Wrote Calibration Markdown to {markdown}")
 
 
 @app.command()

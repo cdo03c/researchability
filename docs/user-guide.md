@@ -111,7 +111,25 @@ uv run researchability score bundle.json results.json -o audit_report.json
 uv run researchability report audit_report.json -o review_dossier.md
 ```
 
-### 5. Using Researchability from Python
+### 5. Run Longitudinal Batch Sweeps & Calibrate Against Human Audits
+
+Run a resumable batch sweep over arXiv categories or Dataverse queries (persisting into DuckDB and Hive-partitioned Parquet):
+
+```bash
+uv run researchability batch --source arxiv -C cs.LG -C q-bio.QM --limit 50 \
+  --db results/researchability.duckdb \
+  --parquet-dir results/parquet \
+  --markdown results/analytics.md
+```
+
+Query longitudinal funnel drop-off rates and temporal trends from an existing warehouse, or calibrate gate precision/recall/Cohen's $\kappa$ against human labels:
+
+```bash
+uv run researchability analytics --db results/researchability.duckdb -m results/analytics.md
+uv run researchability calibrate ground_truth.jsonl -o cal.json -m cal.md
+```
+
+### 6. Using Researchability from Python
 
 ```python
 from pathlib import Path
@@ -139,4 +157,5 @@ with ArxivConnector() as arxiv, ArtifactResolver() as resolver:
 - **Milestone 2 (Complete):** arXiv connector, Harvard Dataverse connector, and outbound artifact resolver (GitHub, Zenodo, OSF, DOIs).
 - **Milestone 3 (Complete):** Automated Stage 0–3 gate evaluators, schema profiler, and GRIM/`p`-value forensic checks.
 - **Milestone 4 (Complete):** Hardened Docker sandbox runner, separate zero-touch (`G4.4`) vs. diff-logged repair (`G4.5`) execution, Stage 5 numeric verification (`G5.1`), artifact checks (`G5.2`), and I4R-style human debate dossier synthesis (`G5.3`).
-- **Upcoming (M5–M6):** Large-scale DuckDB/Parquet batch sweeps, human benchmark calibration, and cross-field overlays.
+- **Milestone 5 (Complete):** DuckDB/partitioned-Parquet longitudinal store, resumable batch sweep runner, trend analytics queries, and human ground-truth calibration benchmark.
+- **Upcoming (M6):** Cross-field overlays (Biomedicine, Psychology, Economics) and companion meta-science scripts.

@@ -29,4 +29,14 @@ researchability score paper_bundle.json gate_results.json -o audit_report.json
 
 # Render a Markdown summary for human review
 researchability report audit_report.json -o summary.md
+
+# Run a resumable batch sweep into DuckDB + partitioned Parquet and print analytics Markdown
+researchability batch --source arxiv -C cs.LG -C q-bio.QM --limit 50 \
+  --db results/researchability.duckdb --parquet-dir results/parquet -m results/analytics.md
+
+# Query longitudinal funnel drop-off, failure modes, and temporal trends
+researchability analytics --db results/researchability.duckdb -m results/analytics.md
+
+# Validate automated binary gates against human-labeled benchmark data
+researchability calibrate benchmark.jsonl -o calibration.json -m calibration.md
 ```

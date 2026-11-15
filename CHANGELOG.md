@@ -26,9 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Stage 4 execution gates (`gates/stage4_execution.py`): container build (`G4.2`), data-prep run (`G4.3`), separate unmodified zero-touch execution (`G4.4`), and bounded diff-logged minor mechanical repair execution (`G4.5`).
   - Stage 5 output fidelity verifier & I4R-style human debate dossier generator (`gates/stage5_verification.py`): reported-vs-reproduced numeric metric matching (`G5.1`), non-empty table/figure verification (`G5.2`), and Markdown dossier synthesis (`G5.3`).
   - CLI `researchability audit --execute --dossier ...` supporting full Stage 0–5 evaluation.
+- Milestone 5 Batch Pipeline, Analytics & Human Validation (`TRE-102`, `TRE-103`):
+  - Longitudinal DuckDB & Hive-partitioned Parquet warehouse (`storage/store.py`): normalized `papers`, `audit_reports`, `gate_results`, and `batch_runs` tables partitioned by `(source_repo, profile, year_part)`, plus SQL queries for funnel drop-off, failure modes, and temporal trends.
+  - Resumable batch repository sweep runner (`batch/runner.py`): rate-limited sweeps across arXiv, Harvard Dataverse, or local `PaperBundle` directories with per-paper workspace isolation and cleanup.
+  - Ground-truth human calibration benchmark (`calibration/benchmark.py`): computes per-gate confusion matrices (`TP`/`FP`/`FN`/`TN`), Precision, Recall, F1, Cohen's $\kappa$, funnel depth MAE, and deterministic vs. LLM-assisted reliability rollups.
+  - Upgraded CLI `researchability batch`, `researchability analytics`, and `researchability calibrate` commands.
 
 ### Planned
-- Milestone 5–6: Large-scale DuckDB/Parquet batch sweeps, I4R benchmark calibration, and cross-field domain overlays (`TRE-102`–`TRE-106`).
+- Milestone 6: Cross-field domain overlays (Biomedicine, Psychology, Economics) (`TRE-104`–`TRE-106`).
 
 ## [0.0.0] - 2026-11-14
 
