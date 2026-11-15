@@ -213,10 +213,11 @@ def _iter_workspace_files(root: Path | None) -> list[Path]:
 
 
 def detect_primary_language(paper: PaperBundle, workdir: Path | None = None) -> str:
-    """Infer primary runtime language ('python', 'r', 'stata', 'mixed', or 'unknown')."""
+    """Infer primary runtime language ('python', 'r', 'stata', 'julia', 'mixed', or 'unknown')."""
     py_markers = 0
     r_markers = 0
     stata_markers = 0
+    julia_markers = 0
 
     workdir_paths = (
         [str(p.relative_to(workdir)) for p in _iter_workspace_files(workdir)]
@@ -242,8 +243,12 @@ def detect_primary_language(paper: PaperBundle, workdir: Path | None = None) -> 
             r_markers += 1
         elif lower.endswith((".do", ".ado")):
             stata_markers += 1
+        elif lower.endswith(".jl") or name == "project.toml":
+            julia_markers += 1
 
-    active_langs = sum(1 for count in (py_markers, r_markers, stata_markers) if count > 0)
+    active_langs = sum(
+        1 for count in (py_markers, r_markers, stata_markers, julia_markers) if count > 0
+    )
     if active_langs > 1:
         return "mixed"
     if py_markers > 0:
@@ -252,6 +257,8 @@ def detect_primary_language(paper: PaperBundle, workdir: Path | None = None) -> 
         return "r"
     if stata_markers > 0:
         return "stata"
+    if julia_markers > 0:
+        return "julia"
     return "unknown"
 
 
@@ -264,9 +271,10 @@ def _compute_total_data_bytes(paper: PaperBundle, workdir: Path | None) -> int:
         data_rel_set = {rel.lower() for rel in paper.artifacts.data_files}
         for file_path in _iter_workspace_files(workdir):
             rel_str = str(file_path.relative_to(workdir)).lower()
+            parts = set(file_path.parts[len(workdir.parts) :])
             is_data = (
                 rel_str in data_rel_set
-                or file_path.parts[len(workdir.parts) :].count("dataverse_files") > 0
+                or bool(parts & {"dataverse_files", "zenodo_files", "osf_files"})
                 or file_path.suffix.lower()
                 in {
                     ".csv",
@@ -277,6 +285,9 @@ def _compute_total_data_bytes(paper: PaperBundle, workdir: Path | None) -> int:
                     ".hdf5",
                     ".rds",
                     ".rdata",
+                    ".dta",
+                    ".sav",
+                    ".xlsx",
                     ".zip",
                 }
             )
@@ -458,6 +469,20 @@ class DockerSandboxRunner:
             lines.append("USER 65534:65534")
             return "\n".join(lines) + "\n"
 
+        if language == "julia":
+            project_toml = self._find_manifest(workdir, "Project.toml")
+            lines = [
+                "FROM julia:1.10-bookworm",
+                "WORKDIR /workspace",
+                "COPY . /workspace",
+            ]
+            if project_toml is not None:
+                lines.append(
+                    'RUN julia --project=. -e "using Pkg; Pkg.instantiate(); Pkg.precompile()"'
+                )
+            lines.append("USER 65534:65534")
+            return "\n".join(lines) + "\n"
+
         if (
             env_yml is not None
             and req_file is None
@@ -496,6 +521,11 @@ class DockerSandboxRunner:
             lines.append("RUN pip install --no-cache-dir pipenv && pipenv install --system")
         elif pyproject_file is not None:
             lines.append("RUN pip install --no-cache-dir .")
+        has_notebooks = any(
+            p.suffix.lower() == ".ipynb" for p in _iter_workspace_files(workdir)
+        ) or any(c.lower().endswith(".ipynb") for c in paper.artifacts.code_files)
+        if has_notebooks:
+            lines.append("RUN pip install --no-cache-dir nbconvert ipykernel")
         lines.append("USER 65534:65534")
         return "\n".join(lines) + "\n"
 

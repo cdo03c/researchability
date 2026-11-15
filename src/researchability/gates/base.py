@@ -55,7 +55,12 @@ class EvaluationContext:
         roots: list[Path] = []
         if self.workdir and self.workdir.exists():
             roots.append(self.workdir)
-            for sub in (self.workdir / "dataverse_files", self.workdir / "repos"):
+            for sub in (
+                self.workdir / "dataverse_files",
+                self.workdir / "repos",
+                self.workdir / "zenodo_files",
+                self.workdir / "osf_files",
+            ):
                 if sub.exists():
                     roots.append(sub)
         for link in self.paper.artifacts.links:
@@ -77,8 +82,8 @@ class EvaluationContext:
                     seen.add(direct)
                     found.append(direct)
                     break
-                # Also inspect one level down (e.g., cloned repo directory under repos/)
-                if root.name == "repos":
+                # Also inspect one level down (cloned repos, Zenodo records, OSF nodes)
+                if root.name in {"repos", "zenodo_files", "osf_files"}:
                     for child in root.iterdir():
                         nested = child / rel
                         if nested.is_file() and nested not in seen:
@@ -105,7 +110,7 @@ class EvaluationContext:
         if self.paper.sections:
             for name, body in self.paper.sections.items():
                 parts.append(f"Section [{name}]:\n{body[:4000]}")
-        elif self.paper.full_text:
+        if self.paper.full_text:
             parts.append(f"Full Text:\n{self.paper.full_text[:max_chars]}")
         return "\n\n".join(parts)[:max_chars]
 

@@ -11,7 +11,13 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from researchability.connectors import ArtifactResolver, ArxivConnector, DataverseConnector
+from researchability.connectors import (
+    ArtifactResolver,
+    ArxivConnector,
+    DataverseConnector,
+    IcpsrConnector,
+    OsfConnector,
+)
 from researchability.gates import (
     evaluate_stage0_to_3,
     evaluate_stage0_to_5_with_context,
@@ -46,7 +52,7 @@ class BatchTarget(BaseModel):
     """Single target identifier queued for batch ingestion and scoring."""
 
     paper_id: str
-    source_repo: str = Field(description="arxiv | dataverse")
+    source_repo: str = Field(description="arxiv | dataverse | osf | icpsr")
 
 
 class BatchRunSummary(BaseModel):
@@ -76,6 +82,10 @@ def _candidate_paper_ids(raw_id: str) -> set[str]:
         f"doi:{bare_id}",
         f"dataverse:{bare_id}",
         f"dataverse:{raw_id}",
+        f"osf:{bare_id}",
+        f"osf:{raw_id}",
+        f"icpsr:{bare_id}",
+        f"icpsr:{raw_id}",
     }
 
 
@@ -90,6 +100,8 @@ class BatchSweepRunner:
         registry: GateRegistry | None = None,
         arxiv: ArxivConnector | None = None,
         dataverse: DataverseConnector | None = None,
+        osf: OsfConnector | None = None,
+        icpsr: IcpsrConnector | None = None,
         resolver: ArtifactResolver | None = None,
         llm: GeminiClient | None = None,
         sandbox: DockerSandboxRunner | None = None,
@@ -99,6 +111,8 @@ class BatchSweepRunner:
         self.registry = registry or GateRegistry.from_yaml()
         self._arxiv = arxiv
         self._dataverse = dataverse
+        self._osf = osf
+        self._icpsr = icpsr
         self._resolver = resolver
         self._owns_llm = llm is None and self.config.use_llm
         self._llm = llm if llm is not None else (GeminiClient() if self.config.use_llm else None)
@@ -216,9 +230,13 @@ class BatchSweepRunner:
         completed = self.store.completed_paper_ids() if self.config.resume else set()
         owns_arxiv = self._arxiv is None
         owns_dv = self._dataverse is None
+        owns_osf = self._osf is None
+        owns_icpsr = self._icpsr is None
         owns_resolver = self._resolver is None
         arxiv_conn = self._arxiv or ArxivConnector()
         dv_conn = self._dataverse or DataverseConnector()
+        osf_conn = self._osf or OsfConnector()
+        icpsr_conn = self._icpsr or IcpsrConnector()
         resolver_conn = self._resolver or ArtifactResolver()
 
         processed = 0
@@ -242,6 +260,12 @@ class BatchSweepRunner:
                         paper = arxiv_conn.fetch_paper(target.paper_id, workdir=wd)
                     elif target.source_repo == "dataverse":
                         paper = dv_conn.fetch_dataset(target.paper_id, workdir=wd)
+                    elif target.source_repo == "osf":
+                        paper = osf_conn.fetch_project(
+                            target.paper_id, workdir=wd, download_files=True
+                        )
+                    elif target.source_repo == "icpsr":
+                        paper = icpsr_conn.fetch_project(target.paper_id)
                     else:
                         msg = f"Unsupported batch source_repo: {target.source_repo}"
                         raise ValueError(msg)
@@ -264,6 +288,10 @@ class BatchSweepRunner:
                 arxiv_conn.close()
             if owns_dv:
                 dv_conn.close()
+            if owns_osf:
+                osf_conn.close()
+            if owns_icpsr:
+                icpsr_conn.close()
             if owns_resolver:
                 resolver_conn.close()
 

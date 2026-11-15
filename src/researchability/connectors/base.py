@@ -5,11 +5,14 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
-from typing import Self
+from collections import deque
+from pathlib import Path
+from typing import Any, Self
+from urllib.parse import urljoin
 
 import httpx
 
-from researchability.connectors.links import is_safe_public_url
+from researchability.connectors.links import is_safe_public_url, safe_resolve_under
 
 logger = logging.getLogger(__name__)
 _TRANSIENT_STATUS_CODES = {429, 502, 503, 504}
@@ -149,3 +152,153 @@ class HttpConnector:
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+
+def stream_download_file(
+    client: httpx.Client,
+    url: str,
+    dest: Path,
+    *,
+    max_bytes: int,
+    already_downloaded: int = 0,
+    resolve_dns: bool = False,
+) -> tuple[int, bool, int | None]:
+    """Stream-download a public HTTP(S) URL to ``dest`` enforcing byte and SSRF limits.
+
+    Returns ``(bytes_written, exceeded_budget, status_code)``. Deletes partial files on
+    budget overflow or non-200 status. Raises ``UnsafeUrlError`` if URL or redirect targets
+    resolve to a private/internal address.
+    """
+    if not is_safe_public_url(url, resolve_dns=resolve_dns):
+        raise UnsafeUrlError(f"Blocked unsafe or non-public URL: {url}")
+
+    written = 0
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with client.stream("GET", url) as resp:
+        hops = [str(hop.url) for hop in (*resp.history, resp)]
+        if 300 <= resp.status_code < 400 and "location" in resp.headers:
+            hops.append(urljoin(str(resp.url), resp.headers["location"]))
+        if any(not is_safe_public_url(hop, resolve_dns=resolve_dns) for hop in hops):
+            raise UnsafeUrlError(f"Blocked unsafe redirect target while fetching: {url}")
+
+        if resp.status_code != 200:
+            return 0, False, resp.status_code
+
+        content_len = resp.headers.get("Content-Length")
+        if (
+            content_len
+            and content_len.isdigit()
+            and already_downloaded + int(content_len) > max_bytes
+        ):
+            return 0, True, resp.status_code
+
+        exceeded = False
+        with dest.open("wb") as out_fh:
+            for chunk in resp.iter_bytes(chunk_size=65_536):
+                written += len(chunk)
+                if already_downloaded + written > max_bytes:
+                    exceeded = True
+                    break
+                out_fh.write(chunk)
+
+        if exceeded:
+            dest.unlink(missing_ok=True)
+            return 0, True, resp.status_code
+        return written, False, resp.status_code
+
+
+def download_osf_storage_files(
+    client: httpx.Client,
+    listing_url: str,
+    dest_dir: Path,
+    *,
+    max_bytes: int,
+    download_files: bool = True,
+    resolve_dns: bool = False,
+    max_pages: int = 10,
+) -> tuple[list[str], int, bool]:
+    """List and optionally download files from an OSF v2 osfstorage tree into ``dest_dir``.
+
+    Returns ``(discovered_rel_paths, total_bytes_reported, budget_exceeded)``.
+    """
+    discovered: list[str] = []
+    total_reported = 0
+    downloaded_bytes = 0
+    queue: deque[str] = deque([listing_url])
+    seen_urls: set[str] = set()
+    pages = 0
+
+    while queue and pages < max_pages:
+        url = queue.popleft()
+        if url in seen_urls or not is_safe_public_url(url, resolve_dns=resolve_dns):
+            continue
+        seen_urls.add(url)
+        pages += 1
+
+        try:
+            resp = client.get(url)
+        except httpx.HTTPError:
+            continue
+        if resp.status_code != 200:
+            continue
+        try:
+            payload = resp.json()
+        except ValueError:
+            continue
+
+        items: list[dict[str, Any]] = payload.get("data") or []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            attrs = item.get("attributes") or {}
+            kind = str(attrs.get("kind") or "")
+            if kind == "folder":
+                rel_folder = (
+                    item.get("relationships", {})
+                    .get("files", {})
+                    .get("links", {})
+                    .get("related", {})
+                )
+                href = rel_folder.get("href") if isinstance(rel_folder, dict) else None
+                if isinstance(href, str) and href:
+                    queue.append(href)
+                continue
+            if kind != "file":
+                continue
+
+            raw_rel = str(attrs.get("materialized_path") or attrs.get("name") or "").lstrip("/")
+            if not raw_rel:
+                continue
+            file_size = int(attrs.get("size") or 0)
+            total_reported += max(0, file_size)
+            if total_reported > max_bytes:
+                return discovered, total_reported, True
+
+            discovered.append(raw_rel)
+            dl_url = (item.get("links") or {}).get("download")
+            if not download_files or not isinstance(dl_url, str) or not dl_url:
+                continue
+
+            target = safe_resolve_under(dest_dir, raw_rel)
+            if target is None:
+                continue
+            try:
+                written, exceeded, _code = stream_download_file(
+                    client,
+                    dl_url,
+                    target,
+                    max_bytes=max_bytes,
+                    already_downloaded=downloaded_bytes,
+                    resolve_dns=resolve_dns,
+                )
+            except UnsafeUrlError:
+                continue
+            if exceeded:
+                return discovered, max(total_reported, downloaded_bytes), True
+            downloaded_bytes += written
+
+        next_url = (payload.get("links") or {}).get("next")
+        if isinstance(next_url, str) and next_url:
+            queue.append(next_url)
+
+    return discovered, max(total_reported, downloaded_bytes), False

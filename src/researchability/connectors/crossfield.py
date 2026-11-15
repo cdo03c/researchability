@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 import httpx
 
-from researchability.connectors.base import HttpConnector
-from researchability.connectors.links import extract_artifact_links
+from researchability.connectors.base import HttpConnector, download_osf_storage_files
+from researchability.connectors.links import (
+    classify_relative_paths,
+    extract_artifact_links,
+    scan_workspace_files,
+)
 from researchability.models import (
     ArtifactLink,
     ArtifactManifest,
@@ -74,15 +79,20 @@ class OsfConnector(HttpConnector):
         *,
         is_preprint: bool = False,
         profile: FieldProfile = FieldProfile.PSYCHOLOGY_SOCIAL,
+        workdir: Path | None = None,
+        download_files: bool = False,
+        max_total_bytes: int = 250 * 1024 * 1024,
     ) -> PaperBundle:
-        """Fetch an OSF node, registration, or PsyArXiv preprint metadata bundle."""
+        """Fetch an OSF node, registration, or PsyArXiv preprint bundle (and optional files)."""
         node_id = _extract_osf_node_id(identifier)
         lowered = identifier.lower()
         is_psyarxiv = is_preprint or "psyarxiv" in lowered or "10.31234" in lowered
+        collection = "nodes"
         if is_psyarxiv:
             endpoint = f"{self.base_url}/preprints/{node_id}/"
             resp = self.client.get(endpoint)
         elif "registrations" in lowered:
+            collection = "registrations"
             endpoint = f"{self.base_url}/registrations/{node_id}/"
             resp = self.client.get(endpoint)
         else:
@@ -91,6 +101,7 @@ class OsfConnector(HttpConnector):
                 reg_resp = self.client.get(f"{self.base_url}/registrations/{node_id}/")
                 if reg_resp.status_code < 400:
                     resp = reg_resp
+                    collection = "registrations"
         resp.raise_for_status()
         payload: dict[str, Any] = resp.json().get("data", {})
         attrs: dict[str, Any] = payload.get("attributes", {})
@@ -102,14 +113,48 @@ class OsfConnector(HttpConnector):
             int(date_created[:4]) if len(date_created) >= 4 and date_created[:4].isdigit() else None
         )
         is_registration = bool(attrs.get("registration")) or attrs.get("category") == "registration"
+        if is_registration and collection == "nodes":
+            collection = "registrations"
+        is_public = bool(attrs.get("public", True))
         tags = attrs.get("tags") or []
 
         links = extract_artifact_links(desc)
+        local_dir = (workdir / "osf_files" / node_id) if (download_files and workdir) else None
+        link_status = ArtifactStatus.RESOLVED if is_public else ArtifactStatus.BLOCKED_ACCESS
+        code_files: list[str] = []
+        data_files: list[str] = []
+        manifest_files: list[str] = []
+        readme_files: list[str] = []
+        total_bytes = 0
+
+        if is_public and not is_psyarxiv:
+            listing_url = f"{self.base_url}/{collection}/{node_id}/files/osfstorage/"
+            discovered, total_bytes, exceeded = download_osf_storage_files(
+                self.client,
+                listing_url,
+                local_dir or Path("osf_files"),
+                max_bytes=max_total_bytes,
+                download_files=local_dir is not None,
+                resolve_dns=self._owns_client,
+            )
+            if exceeded:
+                link_status = ArtifactStatus.BLOCKED_DATA_SIZE
+            if local_dir is not None and local_dir.exists():
+                code_files, data_files, manifest_files, readme_files = scan_workspace_files(
+                    local_dir
+                )
+            elif discovered:
+                code_files, data_files, manifest_files, readme_files = classify_relative_paths(
+                    discovered
+                )
+
         self_link = ArtifactLink(
             url=f"https://osf.io/{node_id}/",
             kind="prereg" if is_registration else "data",
             host="osf",
-            status=ArtifactStatus.RESOLVED,
+            status=link_status,
+            local_path=str(local_dir) if (local_dir is not None and local_dir.exists()) else None,
+            size_bytes=total_bytes,
         )
         if not any(existing.url == self_link.url for existing in links):
             links.insert(0, self_link)
@@ -131,7 +176,13 @@ class OsfConnector(HttpConnector):
             primary_profile=profile,
             abstract=desc,
             full_text=desc,
-            artifacts=ArtifactManifest(links=links),
+            artifacts=ArtifactManifest(
+                links=links,
+                code_files=code_files,
+                data_files=data_files,
+                manifest_files=manifest_files,
+                readme_files=readme_files,
+            ),
             metadata={
                 "osf_node_id": node_id,
                 "is_registration": is_registration,

@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Expanded manifest/environment resilience (`environment.yml`, `uv.lock`, `poetry.lock`, `Pipfile`), added bounded `RetryTransport` HTTP retries (`429`/`502`/`503`/`504` + `Retry-After`), wired optional dossier persistence in `BatchSweepRunner`, added structured CLI logging (`--verbose` / `RESEARCHABILITY_LOG_LEVEL`), and exposed `--profile` and `--timeout` on `researchability calibrate`.
 
 ### Added
+- **Artifact Materialization, Binary Data Profiling, Notebook/Sequential Execution & Starter Calibration Corpus**:
+  - Added shared SSRF- and byte-budget-enforced streaming downloader (`stream_download_file`, `download_osf_storage_files` in `connectors/base.py`) and wired file downloads into `ArtifactResolver` (`zenodo_files/`, `osf_files/`), `OsfConnector.fetch_project(..., workdir=..., download_files=True)`, `researchability ingest osf --workdir --download`, `EvaluationContext.candidate_roots()`, and `BatchSweepRunner` (`osf` / `icpsr` targets).
+  - Expanded `profiler/data_profiler.py` with `_TabularAccumulator`, pure-Python `.xlsx` parsing (`zipfile` + `defusedxml`), Stata `.dta` binary parsing (formats `113`–`115` headers and `117`–`119` `<stata_dta>` XML/binary rows with sentinels, zero-mass, and means), and `.rds`/`.RData`/`.sav` signature validation.
+  - Upgraded Stage 4 execution (`gates/stage4_execution.py`, `sandbox/docker_runner.py`) to run ordered multi-script README workflows (`_discover_main_commands` + sequential error-aware repair), `.ipynb` notebooks via `jupyter nbconvert --execute`, and Julia `.jl` scripts; improved `EvaluationContext.manuscript_snippet` to retain `full_text` alongside `sections` and expanded `G1.8` negative/null phrasing.
+  - Added curated starter I4R + cross-field calibration dataset (`examples/calibration_i4r_starter.jsonl`) and ignored generated `results/` / `*.duckdb` artifacts in `.gitignore`.
 - Milestone 2 repository connectors (`TRE-92`, `TRE-93`, `TRE-94`):
   - `ArxivConnector`: Atom API search, LaTeX source archive parsing (with `pypdf` PDF fallback), section/table extraction, and category-to-profile inference.
   - `DataverseConnector`: Harvard Dataverse Search & Dataset APIs, file manifest classification, download budget checks, and `BLOCKED_ACCESS`/`BLOCKED_DATA_SIZE` detection.

@@ -200,15 +200,41 @@ def ingest_osf(
         FieldProfile,
         typer.Option("--profile", "-p", help="Target disciplinary profile."),
     ] = FieldProfile.PSYCHOLOGY_SOCIAL,
+    workdir: Annotated[
+        Path | None,
+        typer.Option("--workdir", "-w", help="Workspace directory for downloaded OSF files."),
+    ] = None,
+    download_files: Annotated[
+        bool,
+        typer.Option("--download/--manifest-only", help="Download public OSF storage files."),
+    ] = False,
     output: Annotated[
         Path | None,
         typer.Option("--output", "-o", help="Optional output JSON path."),
     ] = None,
 ) -> None:
     """Ingest an OSF project, preregistration, or PsyArXiv preprint into a PaperBundle."""
+    if download_files and workdir is None:
+        typer.echo(
+            "Warning: --download requested without --workdir; fetching manifest only.",
+            err=True,
+        )
     try:
         with OsfConnector() as connector:
-            bundle = connector.fetch_project(node_or_url, is_preprint=preprint, profile=profile)
+            if download_files and workdir is not None:
+                bundle = connector.fetch_project(
+                    node_or_url,
+                    is_preprint=preprint,
+                    profile=profile,
+                    workdir=workdir,
+                    download_files=True,
+                )
+            else:
+                bundle = connector.fetch_project(
+                    node_or_url,
+                    is_preprint=preprint,
+                    profile=profile,
+                )
     except (httpx.HTTPError, ValueError, OSError) as exc:
         typer.echo(f"Error ingesting OSF '{node_or_url}': {exc}", err=True)
         raise typer.Exit(code=1) from exc

@@ -34,8 +34,9 @@ _PREREG_RE = re.compile(
     re.IGNORECASE,
 )
 _LIMITATIONS_RE = re.compile(
-    r"(limitation|negative result|null result|failure case|failed to|"
-    r"no significant difference|does not improve|drawback)",
+    r"(limitation|negative result|negative finding|null result|null finding|null effect|"
+    r"failure case|failure mode|failed to|no significant (?:difference|effect)|"
+    r"does not improve|drawback|caveat)",
     re.IGNORECASE,
 )
 _METHOD_PARAM_RE = re.compile(

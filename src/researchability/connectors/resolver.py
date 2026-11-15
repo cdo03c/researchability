@@ -11,8 +11,17 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from researchability.connectors.base import HttpConnector, UnsafeUrlError
-from researchability.connectors.links import is_safe_public_url, scan_workspace_files
+from researchability.connectors.base import (
+    HttpConnector,
+    UnsafeUrlError,
+    download_osf_storage_files,
+    stream_download_file,
+)
+from researchability.connectors.links import (
+    is_safe_public_url,
+    safe_resolve_under,
+    scan_workspace_files,
+)
 from researchability.models import ArtifactLink, ArtifactManifest, ArtifactStatus, PaperBundle
 
 _ZENODO_ID_RE = re.compile(r"zenodo\.(?:org/records?|org/record)/(\d+)|10\.5281/zenodo\.(\d+)")
@@ -133,18 +142,22 @@ class ArtifactResolver(HttpConnector):
         )
         return updated, code_files, data_files, manifest_files, readme_files
 
-    def _resolve_zenodo(self, link: ArtifactLink) -> ArtifactLink:
+    def _resolve_zenodo(
+        self,
+        link: ArtifactLink,
+        workdir: Path | None = None,
+    ) -> tuple[ArtifactLink, list[str], list[str], list[str], list[str]]:
         match = _ZENODO_ID_RE.search(link.url)
         if not match:
-            return self._resolve_http_head(link)
+            return self._resolve_http_head(link), [], [], [], []
         record_id = match.group(1) or match.group(2)
         resp = self.client.get(f"https://zenodo.org/api/records/{record_id}")
         if resp.status_code == 404:
-            return link.model_copy(update={"status": ArtifactStatus.BROKEN_404})
+            return link.model_copy(update={"status": ArtifactStatus.BROKEN_404}), [], [], [], []
         if resp.status_code in {401, 403}:
-            return link.model_copy(update={"status": ArtifactStatus.BLOCKED_ACCESS})
+            return link.model_copy(update={"status": ArtifactStatus.BLOCKED_ACCESS}), [], [], [], []
         if resp.status_code >= 400:
-            return link.model_copy(update={"status": ArtifactStatus.UNRESOLVED})
+            return link.model_copy(update={"status": ArtifactStatus.UNRESOLVED}), [], [], [], []
 
         data = resp.json()
         access_right = data.get("metadata", {}).get("access_right", "open")
@@ -156,9 +169,53 @@ class ArtifactResolver(HttpConnector):
             status = ArtifactStatus.BLOCKED_DATA_SIZE
         else:
             status = ArtifactStatus.RESOLVED
-        return link.model_copy(
+
+        local_path: str | None = None
+        code_f: list[str] = []
+        data_f: list[str] = []
+        man_f: list[str] = []
+        readme_f: list[str] = []
+
+        if workdir is not None and status == ArtifactStatus.RESOLVED and files:
+            dest_dir = workdir / "zenodo_files" / record_id
+            downloaded_bytes = 0
+            any_written = False
+            for entry in files:
+                if not isinstance(entry, dict):
+                    continue
+                links_map = entry.get("links") or {}
+                dl_url = links_map.get("self") or links_map.get("download")
+                key = str(entry.get("key") or entry.get("filename") or "").lstrip("/")
+                if not isinstance(dl_url, str) or not dl_url or not key:
+                    continue
+                dest = safe_resolve_under(dest_dir, key)
+                if dest is None:
+                    continue
+                try:
+                    written, exceeded, code = stream_download_file(
+                        self.client,
+                        dl_url,
+                        dest,
+                        max_bytes=self.max_data_bytes,
+                        already_downloaded=downloaded_bytes,
+                        resolve_dns=self._owns_client,
+                    )
+                except UnsafeUrlError:
+                    continue
+                if exceeded:
+                    status = ArtifactStatus.BLOCKED_DATA_SIZE
+                    break
+                if code == 200:
+                    downloaded_bytes += written
+                    any_written = True
+            if any_written and dest_dir.exists():
+                local_path = str(dest_dir)
+                code_f, data_f, man_f, readme_f = scan_workspace_files(dest_dir)
+
+        updated = link.model_copy(
             update={
                 "status": status,
+                "local_path": local_path or link.local_path,
                 "size_bytes": total_bytes,
                 "metadata": {
                     **link.metadata,
@@ -168,28 +225,70 @@ class ArtifactResolver(HttpConnector):
                 },
             }
         )
+        return updated, code_f, data_f, man_f, readme_f
 
-    def _resolve_osf(self, link: ArtifactLink) -> ArtifactLink:
+    def _resolve_osf(
+        self,
+        link: ArtifactLink,
+        workdir: Path | None = None,
+    ) -> tuple[ArtifactLink, list[str], list[str], list[str], list[str]]:
         match = _OSF_ID_RE.search(link.url)
         if not match:
-            return self._resolve_http_head(link)
+            return self._resolve_http_head(link), [], [], [], []
         node_id = match.group(1)
-        resp = self.client.get(f"https://api.osf.io/v2/nodes/{node_id}/")
+        is_reg = "registr" in link.url.lower()
+        collection = "registrations" if is_reg else "nodes"
+        resp = self.client.get(f"https://api.osf.io/v2/{collection}/{node_id}/")
+        if resp.status_code == 404 and not is_reg:
+            reg_resp = self.client.get(f"https://api.osf.io/v2/registrations/{node_id}/")
+            if reg_resp.status_code < 400:
+                resp = reg_resp
+                collection = "registrations"
         if resp.status_code == 404:
-            return link.model_copy(update={"status": ArtifactStatus.BROKEN_404})
+            return link.model_copy(update={"status": ArtifactStatus.BROKEN_404}), [], [], [], []
         if resp.status_code in {401, 403}:
-            return link.model_copy(update={"status": ArtifactStatus.BLOCKED_ACCESS})
+            return link.model_copy(update={"status": ArtifactStatus.BLOCKED_ACCESS}), [], [], [], []
         if resp.status_code >= 400:
-            return link.model_copy(update={"status": ArtifactStatus.UNRESOLVED})
+            return link.model_copy(update={"status": ArtifactStatus.UNRESOLVED}), [], [], [], []
         attrs = resp.json().get("data", {}).get("attributes", {})
         is_public = attrs.get("public", True)
         status = ArtifactStatus.RESOLVED if is_public else ArtifactStatus.BLOCKED_ACCESS
-        return link.model_copy(
+
+        local_path: str | None = None
+        total_bytes = link.size_bytes
+        code_f: list[str] = []
+        data_f: list[str] = []
+        man_f: list[str] = []
+        readme_f: list[str] = []
+
+        if workdir is not None and status == ArtifactStatus.RESOLVED:
+            dest_dir = workdir / "osf_files" / node_id
+            listing_url = f"https://api.osf.io/v2/{collection}/{node_id}/files/osfstorage/"
+            discovered, reported_bytes, exceeded = download_osf_storage_files(
+                self.client,
+                listing_url,
+                dest_dir,
+                max_bytes=self.max_data_bytes,
+                download_files=True,
+                resolve_dns=self._owns_client,
+            )
+            if reported_bytes:
+                total_bytes = reported_bytes
+            if exceeded:
+                status = ArtifactStatus.BLOCKED_DATA_SIZE
+            elif discovered and dest_dir.exists():
+                local_path = str(dest_dir)
+                code_f, data_f, man_f, readme_f = scan_workspace_files(dest_dir)
+
+        updated = link.model_copy(
             update={
                 "status": status,
+                "local_path": local_path or link.local_path,
+                "size_bytes": total_bytes,
                 "metadata": {**link.metadata, "osf_id": node_id, "public": is_public},
             }
         )
+        return updated, code_f, data_f, man_f, readme_f
 
     def _resolve_http_head(self, link: ArtifactLink) -> ArtifactLink:
         if not is_safe_public_url(link.url, resolve_dns=self._owns_client):
@@ -253,9 +352,9 @@ class ArtifactResolver(HttpConnector):
         if link.host == "github":
             return self._resolve_github(link, workdir)
         if link.host == "zenodo":
-            return self._resolve_zenodo(link), [], [], [], []
+            return self._resolve_zenodo(link, workdir)
         if link.host == "osf":
-            return self._resolve_osf(link), [], [], [], []
+            return self._resolve_osf(link, workdir)
         return self._resolve_http_head(link), [], [], [], []
 
     def resolve_manifest(

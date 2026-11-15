@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field
 
-from researchability.connectors.base import HttpConnector
+from researchability.connectors.base import HttpConnector, stream_download_file
 from researchability.connectors.links import (
     extract_artifact_links,
     safe_resolve_under,
@@ -207,25 +207,23 @@ class DataverseConnector(HttpConnector):
                 dest = safe_resolve_under(local_dir, rel_dest)
                 if dest is None:
                     continue
-                dest.parent.mkdir(parents=True, exist_ok=True)
                 file_url = f"{self.base_url}/api/access/datafile/{file_id}"
-                with self.client.stream("GET", file_url) as file_resp:
-                    if file_resp.status_code == 200:
-                        exceeded = False
-                        with dest.open("wb") as out_fh:
-                            for chunk in file_resp.iter_bytes(chunk_size=65_536):
-                                downloaded_bytes += len(chunk)
-                                if downloaded_bytes > max_total_bytes:
-                                    exceeded = True
-                                    break
-                                out_fh.write(chunk)
-                        if exceeded:
-                            dest.unlink(missing_ok=True)
-                            dataset_status = ArtifactStatus.BLOCKED_DATA_SIZE
-                            break
-                        downloaded_paths.append(dest.relative_to(local_dir.resolve()).as_posix())
-                    elif file_resp.status_code in {401, 403}:
-                        dataset_status = ArtifactStatus.BLOCKED_ACCESS
+                written, exceeded, status_code = stream_download_file(
+                    self.client,
+                    file_url,
+                    dest,
+                    max_bytes=max_total_bytes,
+                    already_downloaded=downloaded_bytes,
+                    resolve_dns=self._owns_client,
+                )
+                if exceeded:
+                    dataset_status = ArtifactStatus.BLOCKED_DATA_SIZE
+                    break
+                if status_code == 200:
+                    downloaded_bytes += written
+                    downloaded_paths.append(dest.relative_to(local_dir.resolve()).as_posix())
+                elif status_code in {401, 403}:
+                    dataset_status = ArtifactStatus.BLOCKED_ACCESS
 
         if local_dir is not None and local_dir.exists():
             code_files, data_files, manifest_files, readme_files = scan_workspace_files(local_dir)

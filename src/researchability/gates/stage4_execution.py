@@ -22,7 +22,12 @@ from researchability.sandbox import (
 )
 
 _README_CMD_RE = re.compile(
-    r"(?:^|\s|`)(python3?|Rscript|bash|sh)\s+([^\s`\"';|&]+\.(?:py|R|r|sh))\b",
+    r"(?:^|\s|`)(python3?|Rscript|bash|sh|julia|stata(?:-mp|-se)?)\s+"
+    r"(?:-\w+\s+|do\s+)?([^\s`\"';|&]+\.(?:py|R|r|sh|jl|do))\b",
+    re.MULTILINE,
+)
+_README_NOTEBOOK_RE = re.compile(
+    r"(?:jupyter\s+nbconvert[^\n`]*?|papermill)\s+([^\s`\"';|&]+\.ipynb)\b",
     re.MULTILINE,
 )
 _PREP_NAME_RE = re.compile(r"(?:^|[/_-])(prep|preprocess|clean|etl|prepare)", re.IGNORECASE)
@@ -72,6 +77,10 @@ def _command_for_script(rel_path: str) -> list[str]:
         return ["bash", rel_path]
     if lower.endswith(".do"):
         return ["stata-mp", "-b", "do", rel_path]
+    if lower.endswith(".jl"):
+        return ["julia", rel_path]
+    if lower.endswith(".ipynb"):
+        return ["jupyter", "nbconvert", "--to", "notebook", "--execute", "--inplace", rel_path]
     return ["python", rel_path]
 
 
@@ -99,7 +108,7 @@ def _list_workspace_scripts(workdir: Path) -> list[str]:
         rel_parts = path.relative_to(workdir).parts
         if any(part in _IGNORED_COPY_DIRS for part in rel_parts):
             continue
-        if path.is_file() and path.suffix.lower() in {".py", ".r", ".sh", ".do"}:
+        if path.is_file() and path.suffix.lower() in {".py", ".r", ".sh", ".do", ".jl", ".ipynb"}:
             scripts.append(path.relative_to(workdir).as_posix())
     return scripts
 
@@ -118,19 +127,35 @@ def _discover_prep_commands(ctx: EvaluationContext, workdir: Path) -> list[list[
     return commands
 
 
-def _discover_main_command(ctx: EvaluationContext, workdir: Path) -> list[str] | None:
-    # 1. Check README explicitly documented commands first
-    for readme_path, content in ctx.read_text_files(ctx.paper.artifacts.readme_files).items():
-        _ = readme_path
-        for match in _README_CMD_RE.finditer(content):
-            tool, script_raw = match.group(1), match.group(2)
+def _discover_main_commands(ctx: EvaluationContext, workdir: Path) -> list[list[str]]:
+    """Discover ordered README analysis commands or fall back to a single primary entrypoint."""
+    readme_cmds: list[list[str]] = []
+    seen_scripts: set[str] = set()
+    for _readme_path, content in ctx.read_text_files(ctx.paper.artifacts.readme_files).items():
+        matches: list[tuple[int, str | None, str]] = []
+        for m in _README_CMD_RE.finditer(content):
+            matches.append((m.start(), m.group(1), m.group(2)))
+        for m in _README_NOTEBOOK_RE.finditer(content):
+            matches.append((m.start(), None, m.group(1)))
+        for _pos, tool, script_raw in sorted(matches, key=lambda item: item[0]):
             if _PREP_NAME_RE.search(script_raw):
                 continue
             resolved = _resolve_script_relpath(workdir, script_raw)
-            if resolved:
-                return [tool if tool != "python3" else "python", resolved]
+            if not resolved or resolved in seen_scripts:
+                continue
+            seen_scripts.add(resolved)
+            if tool is None:
+                readme_cmds.append(_command_for_script(resolved))
+            else:
+                norm_tool = "python" if tool == "python3" else tool
+                if resolved.lower().endswith(".do") and norm_tool.startswith("stata"):
+                    readme_cmds.append([norm_tool, "-b", "do", resolved])
+                else:
+                    readme_cmds.append([norm_tool, resolved])
+    if readme_cmds:
+        return readme_cmds
 
-    # 2. Match conventional entrypoint names in code_files / workspace
+    # Match conventional entrypoint names in code_files / workspace
     pool: list[str] = []
     seen: set[str] = set()
     for raw in [*ctx.paper.artifacts.code_files, *_list_workspace_scripts(workdir)]:
@@ -142,24 +167,87 @@ def _discover_main_command(ctx: EvaluationContext, workdir: Path) -> list[str] |
     for stem in _MAIN_PRIORITY_STEMS:
         for rel in pool:
             if Path(rel).stem.lower() == stem:
-                return _command_for_script(rel)
+                return [_command_for_script(rel)]
 
-    # 3. Single non-test non-prep script fallback
+    # Single non-test non-prep script fallback
     non_test = [rel for rel in pool if "test" not in Path(rel).stem.lower()]
     if non_test:
-        return _command_for_script(non_test[0])
+        return [_command_for_script(non_test[0])]
     if pool:
-        return _command_for_script(pool[0])
-    return None
+        return [_command_for_script(pool[0])]
+    return []
+
+
+def _discover_main_command(ctx: EvaluationContext, workdir: Path) -> list[str] | None:
+    cmds = _discover_main_commands(ctx, workdir)
+    return cmds[0] if cmds else None
+
+
+def _script_from_command(cmd: list[str]) -> str:
+    return next((tok for tok in reversed(cmd) if "." in tok and not tok.startswith("-")), cmd[-1])
+
+
+def _run_command_sequence(
+    sandbox: DockerSandboxRunner,
+    image_tag: str,
+    commands: list[list[str]],
+    workdir: Path,
+    data_mount: Path | None,
+    *,
+    env: dict[str, str] | None = None,
+) -> tuple[SandboxRunResult, list[str]]:
+    """Run one or more commands sequentially and aggregate produced artifacts/logs."""
+    if len(commands) == 1:
+        return (
+            sandbox.run_command(image_tag, commands[0], workdir, data_mount=data_mount, env=env),
+            commands[0],
+        )
+
+    created: list[str] = []
+    modified: list[str] = []
+    previews: dict[str, str] = {}
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    last_res: SandboxRunResult | None = None
+    last_cmd = commands[0]
+
+    for cmd in commands:
+        last_cmd = cmd
+        res = sandbox.run_command(image_tag, cmd, workdir, data_mount=data_mount, env=env)
+        last_res = res
+        created.extend(res.created_files)
+        modified.extend(res.modified_files)
+        previews.update(res.output_previews)
+        if res.command_result.stdout:
+            stdout_parts.append(res.command_result.stdout)
+        if res.command_result.stderr:
+            stderr_parts.append(res.command_result.stderr)
+        if not res.success:
+            break
+
+    assert last_res is not None
+    merged_cmd_res = last_res.command_result.model_copy(
+        update={
+            "stdout": "\n".join(stdout_parts)[:50_000],
+            "stderr": "\n".join(stderr_parts)[:50_000],
+        }
+    )
+    aggregated = SandboxRunResult(
+        success=last_res.success,
+        command=last_cmd,
+        command_result=merged_cmd_res,
+        created_files=sorted(set(created)),
+        modified_files=sorted(set(modified)),
+        output_previews=previews,
+    )
+    return aggregated, last_cmd
 
 
 def _detect_data_mount(workdir: Path) -> Path | None:
-    dv_dir = workdir / "dataverse_files"
-    if dv_dir.is_dir():
-        return dv_dir
-    data_dir = workdir / "data"
-    if data_dir.is_dir():
-        return data_dir
+    for dirname in ("dataverse_files", "data", "zenodo_files", "osf_files"):
+        candidate = workdir / dirname
+        if candidate.is_dir():
+            return candidate
     return None
 
 
@@ -261,6 +349,8 @@ def _apply_deterministic_repairs(
     repair_dir: Path,
     script_rel: str,
     stderr: str,
+    *,
+    extra_known_files: list[str] | None = None,
 ) -> tuple[list[tuple[str, str, str]], dict[str, str]]:
     """Apply bounded deterministic fixes; return ([(file, reason, diff)], env_overrides)."""
     diffs: list[tuple[str, str, str]] = []
@@ -274,11 +364,20 @@ def _apply_deterministic_repairs(
     updated = original
     reasons: list[str] = []
 
-    # 1. Replace hardcoded absolute file paths pointing to workspace filenames
+    def _lookup_rel(filename: str) -> str | None:
+        found = _find_workspace_file_by_name(repair_dir, filename)
+        if found:
+            return found
+        for cand in extra_known_files or ():
+            if Path(cand).name == filename:
+                return Path(cand).as_posix()
+        return None
+
+    # 1. Replace hardcoded absolute file paths pointing to workspace or generated filenames
     def _replace_abs(match: re.Match[str]) -> str:
         quote, raw_path = match.group(1), match.group(2)
         filename = Path(raw_path.replace("\\", "/")).name
-        found_rel = _find_workspace_file_by_name(repair_dir, filename)
+        found_rel = _lookup_rel(filename)
         if found_rel:
             reasons.append(f"Rewrote hardcoded path '{raw_path}' -> '{found_rel}'.")
             return f"{quote}{found_rel}{quote}"
@@ -291,7 +390,7 @@ def _apply_deterministic_repairs(
     for missing_match in _MISSING_FILE_RE.finditer(stderr):
         missing_str = missing_match.group(1)
         missing_name = Path(missing_str.replace("\\", "/")).name
-        found_rel = _find_workspace_file_by_name(repair_dir, missing_name)
+        found_rel = _lookup_rel(missing_name)
         if found_rel and found_rel != missing_str and missing_str in updated:
             updated = updated.replace(missing_str, found_rel)
             reasons.append(f"Updated relative path '{missing_str}' -> '{found_rel}'.")
@@ -588,20 +687,30 @@ def eval_g4_4_analysis_zero_touch(ctx: EvaluationContext) -> GateResult:
     image_tag = str(
         ctx.extracted_claims.get("sandbox_image_tag") or sandbox.image_tag_for(ctx.paper)
     )
-    main_cmd = _discover_main_command(ctx, ctx.workdir)
-    if main_cmd is None:
+    main_cmds = _discover_main_commands(ctx, ctx.workdir)
+    if not main_cmds:
         return GateResult(
             gate_id="G4.4_ANALYSIS_EXECUTES_ZERO_TOUCH",
             status=GateStatus.FAIL,
             rationale="Could not identify an executable main analysis entrypoint.",
         )
 
+    main_cmd = main_cmds[0]
     ctx.extracted_claims["main_command"] = main_cmd
+    ctx.extracted_claims["main_commands"] = main_cmds
     data_mount = _detect_data_mount(ctx.workdir)
     zero_touch_dir = _copy_sandbox_subworkspace(ctx.workdir, "zero_touch_workspace")
-    run_res = sandbox.run_command(image_tag, main_cmd, zero_touch_dir, data_mount=data_mount)
+    run_res, failed_or_last_cmd = _run_command_sequence(
+        sandbox,
+        image_tag,
+        main_cmds,
+        zero_touch_dir,
+        data_mount,
+    )
     ctx.extracted_claims["analysis_run_zero_touch"] = run_res
+    ctx.extracted_claims["analysis_last_command"] = failed_or_last_cmd
 
+    cmd_label = " && ".join(" ".join(c) for c in main_cmds)
     if run_res.success:
         ctx.extracted_claims["analysis_run_effective"] = run_res
         ctx.extracted_claims["analysis_workdir"] = zero_touch_dir
@@ -609,12 +718,10 @@ def eval_g4_4_analysis_zero_touch(ctx: EvaluationContext) -> GateResult:
         return GateResult(
             gate_id="G4.4_ANALYSIS_EXECUTES_ZERO_TOUCH",
             status=GateStatus.PASS,
-            rationale=(
-                f"Main analysis '{' '.join(main_cmd)}' completed zero-touch in offline sandbox."
-            ),
+            rationale=(f"Main analysis '{cmd_label}' completed zero-touch in offline sandbox."),
             evidence=[
                 EvidenceItem(
-                    source=" ".join(main_cmd),
+                    source=cmd_label,
                     excerpt=(
                         f"created={run_res.created_files[:10]}; "
                         f"stdout={run_res.command_result.stdout[:200]}"
@@ -628,10 +735,10 @@ def eval_g4_4_analysis_zero_touch(ctx: EvaluationContext) -> GateResult:
         gate_id="G4.4_ANALYSIS_EXECUTES_ZERO_TOUCH",
         status=GateStatus.FAIL,
         rationale=(
-            f"Zero-touch analysis '{' '.join(main_cmd)}' failed "
+            f"Zero-touch analysis '{' '.join(failed_or_last_cmd)}' failed "
             f"(exit={run_res.command_result.returncode})."
         ),
-        evidence=[EvidenceItem(source=" ".join(main_cmd), excerpt=excerpt[:600])],
+        evidence=[EvidenceItem(source=" ".join(failed_or_last_cmd), excerpt=excerpt[:600])],
         flags=["ZERO_TOUCH_EXECUTION_FAILED"],
     )
 
@@ -653,15 +760,26 @@ def eval_g4_5_analysis_repaired(ctx: EvaluationContext) -> GateResult:
             rationale="Cannot attempt repair without local workspace.",
         )
 
-    main_cmd: list[str] | None = ctx.extracted_claims.get("main_command") or _discover_main_command(
-        ctx, ctx.workdir
+    raw_cmds = ctx.extracted_claims.get("main_commands")
+    main_cmds: list[list[str]] = (
+        raw_cmds
+        if isinstance(raw_cmds, list) and raw_cmds
+        else _discover_main_commands(ctx, ctx.workdir)
     )
-    if main_cmd is None or len(main_cmd) < 2:
+    target_cmd: list[str] | None = (
+        ctx.extracted_claims.get("analysis_last_command")
+        or ctx.extracted_claims.get("main_command")
+        or (main_cmds[0] if main_cmds else None)
+    )
+    if target_cmd is None or len(target_cmd) < 2:
         return GateResult(
             gate_id="G4.5_ANALYSIS_EXECUTES_REPAIRED",
             status=GateStatus.FAIL,
             rationale="No target entrypoint script available to repair.",
         )
+
+    if not main_cmds:
+        main_cmds = [target_cmd]
 
     sandbox = _get_sandbox(ctx)
     image_tag = str(
@@ -669,7 +787,7 @@ def eval_g4_5_analysis_repaired(ctx: EvaluationContext) -> GateResult:
     )
     repair_dir = _copy_workspace_for_repair(ctx.workdir)
     data_mount = _detect_data_mount(repair_dir)
-    script_rel = main_cmd[1]
+    script_rel = _script_from_command(target_cmd)
     current_stderr = (zero_touch.command_result.stderr if zero_touch is not None else "") or (
         zero_touch.command_result.stdout if zero_touch is not None else ""
     )
@@ -678,11 +796,13 @@ def eval_g4_5_analysis_repaired(ctx: EvaluationContext) -> GateResult:
     env_overrides: dict[str, str] = {}
     repaired_run: SandboxRunResult | None = None
 
+    extra_files = list(zero_touch.created_files) if zero_touch is not None else []
     for _attempt in range(2):
         step_diffs, step_env = _apply_deterministic_repairs(
             repair_dir=repair_dir,
             script_rel=script_rel,
             stderr=current_stderr,
+            extra_known_files=extra_files,
         )
         if not step_diffs and not step_env and ctx.llm is not None:
             llm_patch = _apply_llm_repair(ctx, repair_dir, script_rel, current_stderr)
@@ -694,15 +814,17 @@ def eval_g4_5_analysis_repaired(ctx: EvaluationContext) -> GateResult:
 
         applied_diffs.extend(step_diffs)
         env_overrides.update(step_env)
-        repaired_run = sandbox.run_command(
+        repaired_run, failed_cmd = _run_command_sequence(
+            sandbox,
             image_tag,
-            main_cmd,
+            main_cmds,
             repair_dir,
-            data_mount=data_mount,
+            data_mount,
             env=env_overrides or None,
         )
         if repaired_run.success:
             break
+        script_rel = _script_from_command(failed_cmd)
         current_stderr = repaired_run.command_result.stderr or repaired_run.command_result.stdout
 
     if not applied_diffs and not env_overrides:
@@ -726,6 +848,7 @@ def eval_g4_5_analysis_repaired(ctx: EvaluationContext) -> GateResult:
     if not evidence and env_overrides:
         evidence.append(EvidenceItem(source="env", excerpt=f"env_overrides={env_overrides}"))
 
+    cmd_label = " && ".join(" ".join(c) for c in main_cmds)
     if repaired_run.success:
         ctx.extracted_claims["analysis_run_effective"] = repaired_run
         ctx.extracted_claims["analysis_workdir"] = repair_dir
@@ -733,7 +856,7 @@ def eval_g4_5_analysis_repaired(ctx: EvaluationContext) -> GateResult:
             ctx,
             sandbox,
             image_tag,
-            main_cmd,
+            main_cmds[0],
             repair_dir,
             data_mount,
             base_env=env_overrides or None,
@@ -742,7 +865,7 @@ def eval_g4_5_analysis_repaired(ctx: EvaluationContext) -> GateResult:
             gate_id="G4.5_ANALYSIS_EXECUTES_REPAIRED",
             status=GateStatus.PASS,
             rationale=(
-                f"Main analysis '{' '.join(main_cmd)}' succeeded after logged minor repair "
+                f"Main analysis '{cmd_label}' succeeded after logged minor repair "
                 f"({len(applied_diffs)} file diff(s))."
             ),
             evidence=evidence,
@@ -754,10 +877,10 @@ def eval_g4_5_analysis_repaired(ctx: EvaluationContext) -> GateResult:
         gate_id="G4.5_ANALYSIS_EXECUTES_REPAIRED",
         status=GateStatus.FAIL,
         rationale=(
-            f"Repaired analysis '{' '.join(main_cmd)}' still failed "
+            f"Repaired analysis '{cmd_label}' still failed "
             f"(exit={repaired_run.command_result.returncode})."
         ),
-        evidence=[*evidence, EvidenceItem(source=" ".join(main_cmd), excerpt=err_excerpt[:500])],
+        evidence=[*evidence, EvidenceItem(source=cmd_label, excerpt=err_excerpt[:500])],
         flags=["REPAIR_FAILED"],
     )
 

@@ -24,8 +24,9 @@ researchability audit bundle.json --workdir ./workspaces/demo -o audit_report.js
 # Audit an economics or biomedical study with a field overlay & repframe robustness manifest export
 researchability audit econ_bundle.json --workdir ./workspaces/econ --profile economics --repframe repframe.json
 
-# Ingest an OSF preregistration/PsyArXiv preprint or OpenICPSR economics archive
+# Ingest an OSF project (optionally downloading public files), PsyArXiv preprint, or OpenICPSR economics archive
 researchability ingest osf https://psyarxiv.com/abcde --preprint -o psych_bundle.json
+researchability ingest osf abcde --workdir ./workspaces/osf_abcde --download -o osf_bundle.json
 researchability ingest icpsr 10.3886/E199999V1 -o econ_bundle.json
 
 # Run full Stage 0–5 audit with isolated Docker execution and I4R human review dossier
@@ -44,6 +45,6 @@ researchability batch --source arxiv -C cs.LG -C q-bio.QM --limit 50 \
 # Query longitudinal funnel drop-off, failure modes, and temporal trends
 researchability analytics --db results/researchability.duckdb -m results/analytics.md
 
-# Validate automated binary gates against human-labeled benchmark data
-researchability calibrate benchmark.jsonl -o calibration.json -m calibration.md
+# Validate automated binary gates against human-labeled benchmark data (including starter I4R corpus)
+researchability calibrate examples/calibration_i4r_starter.jsonl -o calibration.json -m calibration.md
 ```

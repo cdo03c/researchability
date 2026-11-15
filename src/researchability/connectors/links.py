@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import socket
+from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -228,24 +229,19 @@ def extract_artifact_links(text: str) -> list[ArtifactLink]:
     return links
 
 
-def scan_workspace_files(root: Path) -> tuple[list[str], list[str], list[str], list[str]]:
-    """Classify files under a directory into (code, data, manifests, readmes)."""
+def classify_relative_paths(
+    rel_paths: Iterable[str],
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Classify relative file paths into (code, data, manifests, readmes)."""
     code_files: list[str] = []
     data_files: list[str] = []
     manifest_files: list[str] = []
     readme_files: list[str] = []
 
-    if not root.exists():
-        return code_files, data_files, manifest_files, readme_files
-
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        if any(part.startswith(".git") for part in path.parts):
-            continue
-        rel = path.relative_to(root).as_posix()
-        name_lower = path.name.lower()
-        suffix_lower = path.suffix.lower()
+    for rel in sorted(set(rel_paths)):
+        p = Path(rel)
+        name_lower = p.name.lower()
+        suffix_lower = p.suffix.lower()
 
         if name_lower.startswith("readme"):
             readme_files.append(rel)
@@ -257,3 +253,19 @@ def scan_workspace_files(root: Path) -> tuple[list[str], list[str], list[str], l
             data_files.append(rel)
 
     return code_files, data_files, manifest_files, readme_files
+
+
+def scan_workspace_files(root: Path) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Classify files under a directory into (code, data, manifests, readmes)."""
+    if not root.exists():
+        return [], [], [], []
+
+    rel_paths: list[str] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if any(part.startswith(".git") for part in path.parts):
+            continue
+        rel_paths.append(path.relative_to(root).as_posix())
+
+    return classify_relative_paths(rel_paths)

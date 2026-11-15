@@ -286,12 +286,13 @@ def evaluate_calibration(
     return compute_calibration_metrics(paired, registry=active_registry)
 
 
-def load_calibration_dataset(path: Path) -> list[CalibrationSample]:
+def load_calibration_dataset(path: Path | str) -> list[CalibrationSample]:
     """Load gold-standard CalibrationSamples from a JSON list or JSONL file."""
-    raw = path.read_text(encoding="utf-8").strip()
+    file_path = Path(path)
+    raw = file_path.read_text(encoding="utf-8").strip()
     if not raw:
         return []
-    if path.suffix.lower() == ".jsonl":
+    if file_path.suffix.lower() == ".jsonl":
         return [
             CalibrationSample.model_validate_json(line) for line in raw.splitlines() if line.strip()
         ]
