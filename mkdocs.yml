@@ -1,5 +1,7 @@
 site_name: Researchability
 site_description: Automated staged binary-gate reproducibility and research integrity scoring engine.
+repo_url: https://github.com/cdo03c/researchability
+repo_name: cdo03c/researchability
 theme:
   name: material
   features:

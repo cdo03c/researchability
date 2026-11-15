@@ -52,6 +52,12 @@ docs = [
     "mkdocs-material>=9.5.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/cdo03c/researchability"
+Repository = "https://github.com/cdo03c/researchability"
+Issues = "https://github.com/cdo03c/researchability/issues"
+Changelog = "https://github.com/cdo03c/researchability/blob/main/CHANGELOG.md"
+
 [project.scripts]
 researchability = "researchability.cli:app"
 

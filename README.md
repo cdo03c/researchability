@@ -1,5 +1,8 @@
 # Researchability
 
+[![CI](https://github.com/cdo03c/researchability/actions/workflows/ci.yml/badge.svg)](https://github.com/cdo03c/researchability/actions/workflows/ci.yml)
+[![Docs](https://github.com/cdo03c/researchability/actions/workflows/docs.yml/badge.svg)](https://github.com/cdo03c/researchability/actions/workflows/docs.yml)
+
 Automated, staged binary-gate reproducibility and research integrity scoring engine, inspired by the [Institute for Replication (I4R)](https://www.i4replication.org/).
 
 ## Features
