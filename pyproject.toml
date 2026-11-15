@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "researchability"
+version = "0.1.0"
+description = "Automated staged binary-gate reproducibility and research integrity scoring engine."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "google-genai>=1.0.0",
+    "pydantic>=2.7.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.0",
+    "typer>=0.12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+researchability = "researchability.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/researchability"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

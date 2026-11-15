@@ -1,0 +1,364 @@
+version: "1.0"
+
+profiles:
+  ml_cs:
+    description: "Machine learning, computer science, and computational methods papers."
+  bioinformatics:
+    description: "Computational biology and bioinformatics papers."
+  biomedicine_wetlab:
+    description: "Experimental biomedicine and wet-lab life sciences overlay."
+  psychology_social:
+    description: "Psychology and behavioral science overlay."
+  economics:
+    description: "Economics and quantitative social science overlay."
+
+gates:
+  # ---------------------------------------------------------------------------
+  # Stage 0: Triage & Field Profile Assignment
+  # ---------------------------------------------------------------------------
+  - id: G0.1_EMPIRICAL_CLAIM
+    stage: 0
+    name: "Empirical or quantitative claim present"
+    description: "Paper presents empirical, computational, or quantitative experimental claims rather than pure theory or survey."
+    problem_domain: triage
+    evaluator_kind: llm_assisted
+    profiles: ["core"]
+    depends_on: []
+    weight: 0.0
+
+  # ---------------------------------------------------------------------------
+  # Stage 1: Transparency, Reporting & Incentive Bias Checks
+  # ---------------------------------------------------------------------------
+  - id: G1.1_DATA_LINK_PRESENT
+    stage: 1
+    name: "Data source or link stated"
+    description: "Paper states where raw or processed evaluation data can be obtained."
+    problem_domain: transparency_reporting
+    evaluator_kind: hybrid
+    profiles: ["core"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 1.0
+
+  - id: G1.2_DATA_ACCESSIBLE
+    stage: 1
+    name: "Data link resolves and is accessible"
+    description: "Referenced dataset DOI/URL resolves and files are retrievable (or flagged BLOCKED_ACCESS if IRB/restricted)."
+    problem_domain: transparency_reporting
+    evaluator_kind: deterministic
+    profiles: ["core"]
+    depends_on: ["G1.1_DATA_LINK_PRESENT"]
+    weight: 1.0
+
+  - id: G1.3_CODE_LINK_PRESENT
+    stage: 1
+    name: "Code repository or archive link present"
+    description: "Paper includes a URL/DOI to source code or replication scripts."
+    problem_domain: transparency_reporting
+    evaluator_kind: hybrid
+    profiles: ["core"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 1.0
+
+  - id: G1.4_CODE_NON_STUB
+    stage: 1
+    name: "Code repository resolves and is non-stub"
+    description: "Code archive resolves and contains substantive workflow scripts rather than an empty or README-only repo."
+    problem_domain: transparency_reporting
+    evaluator_kind: deterministic
+    profiles: ["core"]
+    depends_on: ["G1.3_CODE_LINK_PRESENT"]
+    weight: 1.0
+
+  - id: G1.5_DATA_PREP_CODE
+    stage: 1
+    name: "Data preparation code included"
+    description: "Scripts transforming raw inputs into analysis-ready data are present."
+    problem_domain: transparency_reporting
+    evaluator_kind: hybrid
+    profiles: ["core"]
+    depends_on: ["G1.4_CODE_NON_STUB"]
+    weight: 1.0
+
+  - id: G1.6_METHOD_COMPLETENESS
+    stage: 1
+    name: "Methods and parameters completely reported"
+    description: "Methods section specifies dataset splits, hyperparameters, inclusion rules, or experimental protocol details."
+    problem_domain: transparency_reporting
+    evaluator_kind: llm_assisted
+    profiles: ["core"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 1.0
+
+  - id: G1.7_PREREGISTRATION_DISCLOSED
+    stage: 1
+    name: "Preregistration or analysis plan disclosed"
+    description: "Preregistration or Pre-Analysis Plan (PAP) is linked, or exploratory status is explicitly disclosed."
+    problem_domain: incentive_bias
+    evaluator_kind: llm_assisted
+    profiles: ["core"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 0.5
+
+  - id: G1.8_NULL_NEGATIVE_REPORTING
+    stage: 1
+    name: "Limitations or null/negative cases reported"
+    description: "Paper reports limitations, failure cases, or null/negative comparisons rather than exclusively positive outcomes."
+    problem_domain: incentive_bias
+    evaluator_kind: llm_assisted
+    profiles: ["core"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 0.5
+
+  # ---------------------------------------------------------------------------
+  # Stage 2: Materials, Environment & Technical Variability
+  # ---------------------------------------------------------------------------
+  - id: G2.1_README_ENTRYPOINT
+    stage: 2
+    name: "README documents execution order"
+    description: "Documentation specifies entrypoints and execution order for reproducing results."
+    problem_domain: materials_variability
+    evaluator_kind: hybrid
+    profiles: ["core"]
+    depends_on: ["G1.4_CODE_NON_STUB"]
+    weight: 1.0
+
+  - id: G2.2_ENV_MANIFEST
+    stage: 2
+    name: "Dependency manifest present"
+    description: "Repository includes a software environment specification (pyproject.toml, requirements.txt, environment.yml, renv.lock, or Dockerfile)."
+    problem_domain: materials_variability
+    evaluator_kind: deterministic
+    profiles: ["core"]
+    depends_on: ["G1.4_CODE_NON_STUB"]
+    weight: 1.0
+
+  - id: G2.3_VERSIONS_PINNED
+    stage: 2
+    name: "Dependency versions pinned"
+    description: "Core runtime and library versions are pinned in manifests or lockfiles."
+    problem_domain: materials_variability
+    evaluator_kind: deterministic
+    profiles: ["core"]
+    depends_on: ["G2.2_ENV_MANIFEST"]
+    weight: 1.0
+
+  - id: G2.4_STOCHASTIC_CONTROLS
+    stage: 2
+    name: "Randomness and seed controls documented"
+    description: "Random seeds, deterministic flags, or multi-seed variance protocols are documented or implemented."
+    problem_domain: materials_variability
+    evaluator_kind: hybrid
+    profiles: ["core"]
+    depends_on: ["G1.4_CODE_NON_STUB"]
+    weight: 1.0
+
+  - id: G2.5_HARDWARE_SPECS
+    stage: 2
+    name: "Compute and hardware requirements disclosed"
+    description: "Paper or repository states hardware/compute requirements (CPU, GPU, RAM, approximate runtime)."
+    problem_domain: materials_variability
+    evaluator_kind: llm_assisted
+    profiles: ["core"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 0.5
+
+  - id: G2.6_BIO_REFERENCE_PINNED
+    stage: 2
+    name: "Reference genomes and accessions pinned"
+    description: "Reference genome builds, annotation releases, and public accessions (GEO/SRA/Ensembl) are pinned."
+    problem_domain: materials_variability
+    evaluator_kind: llm_assisted
+    profiles: ["bioinformatics"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 1.0
+
+  - id: G2.7_WETLAB_MATERIALS_RRID
+    stage: 2
+    name: "Biological materials and cell lines authenticated"
+    description: "Cell lines, antibodies, and reagents cite RRIDs/catalogs and authentication/contamination checks."
+    problem_domain: materials_variability
+    evaluator_kind: llm_assisted
+    profiles: ["biomedicine_wetlab"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 1.0
+
+  # ---------------------------------------------------------------------------
+  # Stage 3: Study Design, Statistical Rigor & Data Integrity Forensics
+  # ---------------------------------------------------------------------------
+  - id: G3.1_SAMPLE_SIZE_STATED
+    stage: 3
+    name: "Sample sizes and split counts stated"
+    description: "Explicit sample sizes (N, train/val/test counts, cohort sizes) are stated in the paper."
+    problem_domain: study_design
+    evaluator_kind: llm_assisted
+    profiles: ["core"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 1.0
+
+  - id: G3.2_POWER_OR_BUDGET_JUSTIFIED
+    stage: 3
+    name: "Statistical power or evaluation budget justified"
+    description: "Sample-size/power calculation or multi-run benchmark budget justification is reported."
+    problem_domain: study_design
+    evaluator_kind: llm_assisted
+    profiles: ["core"]
+    depends_on: ["G3.1_SAMPLE_SIZE_STATED"]
+    weight: 1.0
+
+  - id: G3.3_CONTROLS_AND_BASELINES
+    stage: 3
+    name: "Appropriate controls and baselines included"
+    description: "Study includes experimental controls, comparative baselines, or ablation checks."
+    problem_domain: study_design
+    evaluator_kind: llm_assisted
+    profiles: ["core"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 1.0
+
+  - id: G3.4_EFFECT_SIZES_UNCERTAINTY
+    stage: 3
+    name: "Effect sizes and uncertainty metrics reported"
+    description: "Reports effect sizes with confidence intervals, standard errors, or multi-seed variance rather than bare p-values or single point estimates."
+    problem_domain: statistical_rigor
+    evaluator_kind: llm_assisted
+    profiles: ["core"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 1.0
+
+  - id: G3.5_MULTIPLE_TESTING_CONTROLLED
+    stage: 3
+    name: "Multiple testing or comparisons accounted for"
+    description: "Multiple hypothesis tests or multi-benchmark comparisons apply correction or address family-wise error."
+    problem_domain: statistical_rigor
+    evaluator_kind: llm_assisted
+    profiles: ["core"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 1.0
+
+  - id: G3.6_LEAKAGE_HYGIENE
+    stage: 3
+    name: "Split and confirmatory hygiene verified"
+    description: "No static signs of train/test data leakage or undisclosed post-hoc hypothesis switching."
+    problem_domain: statistical_rigor
+    evaluator_kind: hybrid
+    profiles: ["core"]
+    depends_on: ["G1.4_CODE_NON_STUB"]
+    weight: 1.0
+
+  - id: G3.7_DATA_READABLE_MATCHES_N
+    stage: 3
+    name: "Data files parse and match reported N"
+    description: "Provided data files parse cleanly and observed dimensions/sample counts match paper descriptions."
+    problem_domain: data_integrity
+    evaluator_kind: hybrid
+    profiles: ["core"]
+    depends_on: ["G1.2_DATA_ACCESSIBLE", "G3.1_SAMPLE_SIZE_STATED"]
+    weight: 1.5
+
+  - id: G3.8_EXCLUSIONS_DOCUMENTED
+    stage: 3
+    name: "Data exclusions align with paper text"
+    description: "Sample filtering or outlier exclusion in prep scripts matches exclusion rules stated in the paper."
+    problem_domain: data_integrity
+    evaluator_kind: hybrid
+    profiles: ["core"]
+    depends_on: ["G1.5_DATA_PREP_CODE"]
+    weight: 1.0
+
+  - id: G3.9_NUMERIC_CONSISTENCY
+    stage: 3
+    name: "Forensic numeric consistency checks pass"
+    description: "Automated checks (GRIM/granularity, p-value vs. test-statistic, table sum, and summary-stat checks) show no unexplained discrepancies."
+    problem_domain: data_integrity
+    evaluator_kind: deterministic
+    profiles: ["core"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 1.5
+
+  # ---------------------------------------------------------------------------
+  # Stage 4: Sandboxed Execution
+  # ---------------------------------------------------------------------------
+  - id: G4.1_SANDBOX_FEASIBLE
+    stage: 4
+    name: "Execution fits sandbox compute and data budget"
+    description: "Task fits local/container CPU, RAM, disk, and time limits (else BLOCKED_HARDWARE or BLOCKED_DATA_SIZE)."
+    problem_domain: execution_output
+    evaluator_kind: deterministic
+    profiles: ["core"]
+    depends_on: ["G1.2_DATA_ACCESSIBLE", "G1.4_CODE_NON_STUB"]
+    weight: 0.0
+
+  - id: G4.2_ENV_BUILDS
+    stage: 4
+    name: "Container environment builds cleanly"
+    description: "Software environment builds inside isolated container without manual intervention."
+    problem_domain: execution_output
+    evaluator_kind: deterministic
+    profiles: ["core"]
+    depends_on: ["G2.2_ENV_MANIFEST", "G4.1_SANDBOX_FEASIBLE"]
+    weight: 1.0
+
+  - id: G4.3_PREP_EXECUTES
+    stage: 4
+    name: "Data preparation executes cleanly"
+    description: "Data-prep pipeline completes with exit code 0 in offline sandbox."
+    problem_domain: execution_output
+    evaluator_kind: deterministic
+    profiles: ["core"]
+    depends_on: ["G1.5_DATA_PREP_CODE", "G4.2_ENV_BUILDS"]
+    weight: 1.0
+
+  - id: G4.4_ANALYSIS_EXECUTES_ZERO_TOUCH
+    stage: 4
+    name: "Main analysis runs zero-touch"
+    description: "Primary analysis or evaluation script executes to exit code 0 without modification."
+    problem_domain: execution_output
+    evaluator_kind: deterministic
+    profiles: ["core"]
+    depends_on: ["G4.2_ENV_BUILDS"]
+    weight: 1.5
+
+  - id: G4.5_ANALYSIS_EXECUTES_REPAIRED
+    stage: 4
+    name: "Main analysis runs after minor logged repair"
+    description: "Primary analysis executes to exit code 0 after bounded, diff-logged mechanical fixes (e.g., paths/imports)."
+    problem_domain: execution_output
+    evaluator_kind: hybrid
+    profiles: ["core"]
+    depends_on: ["G4.2_ENV_BUILDS"]
+    weight: 0.5
+
+  # ---------------------------------------------------------------------------
+  # Stage 5: Output Fidelity & Human Debate Handoff
+  # ---------------------------------------------------------------------------
+  - id: G5.1_NUMERIC_OUTCOMES_MATCH
+    stage: 5
+    name: "Generated metrics match reported outcomes"
+    description: "Executed script outputs and generated tables match paper-reported values within tolerance."
+    problem_domain: execution_output
+    evaluator_kind: hybrid
+    profiles: ["core"]
+    depends_on: ["G4.4_ANALYSIS_EXECUTES_ZERO_TOUCH", "G4.5_ANALYSIS_EXECUTES_REPAIRED"]
+    dependency_mode: any
+    weight: 2.0
+
+  - id: G5.2_FIGURES_REGENERATE
+    stage: 5
+    name: "Key tables and figures regenerate"
+    description: "Pipeline produces non-empty output tables or figures corresponding to manuscript artifacts."
+    problem_domain: execution_output
+    evaluator_kind: deterministic
+    profiles: ["core"]
+    depends_on: ["G4.4_ANALYSIS_EXECUTES_ZERO_TOUCH", "G4.5_ANALYSIS_EXECUTES_REPAIRED"]
+    dependency_mode: any
+    weight: 1.0
+
+  - id: G5.3_HUMAN_DOSSIER_READY
+    stage: 5
+    name: "Human review dossier synthesized"
+    description: "Audit dossier summarizing gate outcomes, forensic flags, and suggested robustness checks is generated."
+    problem_domain: execution_output
+    evaluator_kind: hybrid
+    profiles: ["core"]
+    depends_on: ["G0.1_EMPIRICAL_CLAIM"]
+    weight: 0.0
