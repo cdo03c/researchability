@@ -73,7 +73,9 @@ class GateRegistry:
                 in_degree[gid] += 1
 
         heap: list[tuple[int, str]] = [
-            (self._gates[gid].stage, gid) for gid, deg in in_degree.items() if deg == 0
+            (self._gates[gid].stage, gid)
+            for gid, deg in in_degree.items()
+            if deg == 0
         ]
         heapq.heapify(heap)
         ordered: list[str] = []
