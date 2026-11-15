@@ -9,6 +9,11 @@ from researchability.models import EvidenceItem, GateResult, GateStatus
 from researchability.profiler.data_profiler import DataFileProfile, profile_data_file
 from researchability.profiler.forensics import extract_claimed_sample_sizes, run_forensic_checks
 from researchability.profiler.hygiene import scan_code_sentinel_risks
+from researchability.profiler.spec_checks import (
+    audit_constants_and_diagnostics,
+    audit_gis_and_binary_sidecars,
+    audit_script_isolation_and_stata,
+)
 
 _CODE_EXCLUSION_RE = re.compile(
     r"(\.dropna\s*\(|\.drop_duplicates\s*\(|\.query\s*\(|na\.omit\s*\(|subset\s*\()",
@@ -108,6 +113,19 @@ def eval_g3_7_data_readable_matches_n(ctx: EvaluationContext) -> GateResult:
     unguarded_sentinel_filters = [
         f for f in sentinel_code_flags if f.startswith("UNGUARDED_SENTINEL_FILTER")
     ]
+    all_known_assets = [*ctx.paper.artifacts.data_files, *ctx.paper.artifacts.code_files]
+    gis_flags = audit_gis_and_binary_sidecars(ctx.workdir, code_texts, all_known_assets)
+    known_cols = {col for prof in profiles for col in prof.columns if col}
+    zero_mass_flags = [
+        f
+        for f in audit_script_isolation_and_stata(code_texts, profiles)
+        if f.startswith("LOG1P_HIGH_ZERO_MASS")
+    ]
+    missing_col_flags = [
+        f
+        for f in audit_constants_and_diagnostics(code_texts, known_cols)
+        if f.startswith("MISSING_REFERENCED_COLUMN")
+    ]
 
     flags: list[str] = []
     for hit in pii_hits[:8]:
@@ -117,6 +135,9 @@ def eval_g3_7_data_readable_matches_n(ctx: EvaluationContext) -> GateResult:
     if empty_cols:
         flags.append(f"EMPTY_DATA_COLUMN: {', '.join(empty_cols[:8])}")
     flags.extend(unguarded_sentinel_filters[:5])
+    flags.extend(gis_flags[:6])
+    flags.extend(zero_mass_flags[:4])
+    flags.extend(missing_col_flags[:4])
 
     data_evidence = [
         EvidenceItem(
@@ -136,6 +157,8 @@ def eval_g3_7_data_readable_matches_n(ctx: EvaluationContext) -> GateResult:
         )
     if all_empty_files:
         blocking_reasons.append(f"all columns 100% missing in {', '.join(all_empty_files[:3])}")
+    if gis_flags:
+        blocking_reasons.append(gis_flags[0])
 
     if blocking_reasons:
         return GateResult(

@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from researchability.gates.base import EvaluationContext
 from researchability.llm.client import ModelTier
 from researchability.models import EvidenceItem, GateResult, GateStatus
+from researchability.profiler.robustness import compare_distributions
 from researchability.sandbox import (
     DockerSandboxRunner,
     SandboxRunResult,
@@ -332,10 +333,35 @@ def eval_g4_1_sandbox_feasible(ctx: EvaluationContext) -> GateResult:
     elif preflight.status == GateStatus.BLOCKED_DATA_SIZE:
         flags.append("OVERSIZED_DATASET")
 
+    ref_vals = ctx.extracted_claims.get("subsampled_reference_vals")
+    cand_vals = ctx.extracted_claims.get("subsampled_candidate_vals")
+    rationale = preflight.reason
+    if (
+        preflight.status in {GateStatus.BLOCKED_DATA_SIZE, GateStatus.BLOCKED_HARDWARE}
+        and isinstance(ref_vals, list)
+        and isinstance(cand_vals, list)
+    ):
+        dist_res = compare_distributions(
+            [float(x) for x in ref_vals],
+            [float(x) for x in cand_vals],
+        )
+        ctx.extracted_claims["distributional_verification"] = dist_res
+        if dist_res.matched:
+            flags.append(
+                f"SUBSAMPLED_DISTRIBUTION_VERIFIED "
+                f"(KS={dist_res.ks_stat}, n={dist_res.n_subsampled})"
+            )
+            rationale = (
+                f"{preflight.reason} Subsampled distributional fallback matched reference "
+                f"(KS={dist_res.ks_stat}, max_q_diff={dist_res.quantile_max_diff})."
+            )
+        else:
+            flags.extend(dist_res.flags)
+
     return GateResult(
         gate_id="G4.1_SANDBOX_FEASIBLE",
         status=preflight.status,
-        rationale=preflight.reason,
+        rationale=rationale,
         evidence=preflight.evidence,
         flags=flags,
     )
@@ -442,6 +468,42 @@ def eval_g4_3_prep_executes(ctx: EvaluationContext) -> GateResult:
     )
 
 
+def _maybe_run_multiseed(
+    ctx: EvaluationContext,
+    sandbox: DockerSandboxRunner,
+    image_tag: str,
+    main_cmd: list[str],
+    workdir: Path,
+    data_mount: Path | None,
+    base_env: dict[str, str] | None = None,
+) -> None:
+    """Optionally run additional seeds in sandbox when multiseed check is enabled."""
+    seeds_raw = ctx.extracted_claims.get("multiseed_values")
+    if isinstance(seeds_raw, list) and seeds_raw:
+        seeds = [int(s) for s in seeds_raw[:5]]
+    elif bool(ctx.extracted_claims.get("run_multiseed_check", False)):
+        seeds = [101, 202, 303]
+    else:
+        return
+
+    seed_results: list[tuple[int, SandboxRunResult]] = []
+    for seed in seeds:
+        env = dict(base_env or {})
+        env["PYTHONHASHSEED"] = str(seed)
+        env["RESEARCHABILITY_SEED"] = str(seed)
+        res = sandbox.run_command(
+            image_tag,
+            main_cmd,
+            workdir,
+            data_mount=data_mount,
+            env=env,
+        )
+        if res.success:
+            seed_results.append((seed, res))
+    if seed_results:
+        ctx.extracted_claims["multiseed_sandbox_results"] = seed_results
+
+
 def eval_g4_4_analysis_zero_touch(ctx: EvaluationContext) -> GateResult:
     """Run main analysis unmodified inside offline sandbox (G4.4)."""
     if ctx.workdir is None or not ctx.workdir.exists():
@@ -471,6 +533,7 @@ def eval_g4_4_analysis_zero_touch(ctx: EvaluationContext) -> GateResult:
     if run_res.success:
         ctx.extracted_claims["analysis_run_effective"] = run_res
         ctx.extracted_claims["analysis_workdir"] = ctx.workdir
+        _maybe_run_multiseed(ctx, sandbox, image_tag, main_cmd, ctx.workdir, data_mount)
         return GateResult(
             gate_id="G4.4_ANALYSIS_EXECUTES_ZERO_TOUCH",
             status=GateStatus.PASS,
@@ -594,6 +657,15 @@ def eval_g4_5_analysis_repaired(ctx: EvaluationContext) -> GateResult:
     if repaired_run.success:
         ctx.extracted_claims["analysis_run_effective"] = repaired_run
         ctx.extracted_claims["analysis_workdir"] = repair_dir
+        _maybe_run_multiseed(
+            ctx,
+            sandbox,
+            image_tag,
+            main_cmd,
+            repair_dir,
+            data_mount,
+            base_env=env_overrides or None,
+        )
         return GateResult(
             gate_id="G4.5_ANALYSIS_EXECUTES_REPAIRED",
             status=GateStatus.PASS,

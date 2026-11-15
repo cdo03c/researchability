@@ -14,6 +14,10 @@ from researchability.profiler.hygiene import (
     detect_duplicate_files,
     detect_output_collisions,
 )
+from researchability.profiler.spec_checks import (
+    audit_constants_and_diagnostics,
+    audit_script_isolation_and_stata,
+)
 
 _README_RUN_RE = re.compile(
     r"(python\s+|rscript\s+|pytest|uv\s+run|make\s+|docker\s+|bash\s+|sh\s+|usage|reproduc|run\s+the)",
@@ -77,6 +81,12 @@ def eval_g2_1_readme_entrypoint(ctx: EvaluationContext) -> GateResult:
         flags.append(f"OUTPUT_COLLISION: {col.target} overwritten by {', '.join(col.writers[:4])}")
     flags.extend(path_audit.flags)
 
+    isolation_flags = audit_script_isolation_and_stata(code_texts)
+    const_flags = audit_constants_and_diagnostics(code_texts)
+    for item in [*isolation_flags, *const_flags]:
+        if item not in flags:
+            flags.append(item)
+
     ctx.extracted_claims["hygiene_audit"] = {
         "stale_references": inv.stale_references,
         "non_plain_text_readmes": inv.non_plain_text_readmes,
@@ -87,6 +97,7 @@ def eval_g2_1_readme_entrypoint(ctx: EvaluationContext) -> GateResult:
         "output_collisions": [f"{c.target} <- {', '.join(c.writers)}" for c in collisions],
         "missing_input_references": path_audit.missing_input_references,
         "hardcoded_dirs": path_audit.hardcoded_dirs,
+        "script_hygiene_flags": [*isolation_flags, *const_flags],
     }
 
     non_plain_set = set(inv.non_plain_text_readmes)

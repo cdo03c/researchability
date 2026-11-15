@@ -35,6 +35,7 @@ class DataFileProfile(BaseModel):
     column_count: int | None = None
     columns: list[str] = Field(default_factory=list)
     numeric_means: dict[str, float] = Field(default_factory=dict)
+    zero_mass_columns: dict[str, float] = Field(default_factory=dict)
     sentinel_columns: dict[str, list[str]] = Field(default_factory=dict)
     empty_columns: list[str] = Field(default_factory=list)
     pii_findings: list[str] = Field(default_factory=list)
@@ -115,6 +116,7 @@ def _profile_delimited(path: Path, delimiter: str, compressed: bool) -> DataFile
             row_count = 0
             sums = [0.0] * n_cols
             counts = [0] * n_cols
+            zero_counts = [0] * n_cols
             non_missing = [0] * n_cols
             numeric_distinct: list[set[float]] = [set() for _ in range(n_cols)]
             strong_hits: list[set[int]] = [set() for _ in range(n_cols)]
@@ -141,6 +143,8 @@ def _profile_delimited(path: Path, delimiter: str, compressed: bool) -> DataFile
                         fval = float(val_str)
                         sums[idx] += fval
                         counts[idx] += 1
+                        if fval == 0.0:
+                            zero_counts[idx] += 1
                         if len(numeric_distinct[idx]) < 200:
                             numeric_distinct[idx].add(fval)
                         if fval.is_integer():
@@ -155,6 +159,11 @@ def _profile_delimited(path: Path, delimiter: str, compressed: bool) -> DataFile
                 columns[i]: sums[i] / counts[i]
                 for i in range(n_cols)
                 if counts[i] > 0 and columns[i]
+            }
+            zero_mass = {
+                columns[i]: round(zero_counts[i] / counts[i], 4)
+                for i in range(n_cols)
+                if counts[i] >= 5 and zero_counts[i] > 0 and columns[i]
             }
             sentinel_cols, empty_cols, pii_findings = _analyze_tab_pii_and_sentinels(
                 columns,
@@ -174,6 +183,7 @@ def _profile_delimited(path: Path, delimiter: str, compressed: bool) -> DataFile
                 column_count=n_cols,
                 columns=columns,
                 numeric_means=means,
+                zero_mass_columns=zero_mass,
                 sentinel_columns=sentinel_cols,
                 empty_columns=empty_cols,
                 pii_findings=pii_findings,

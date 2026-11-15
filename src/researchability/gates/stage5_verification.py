@@ -21,6 +21,11 @@ from researchability.models import (
     PaperBundle,
 )
 from researchability.profiler.forensics import extract_claimed_sample_sizes
+from researchability.profiler.robustness import (
+    run_quantitative_perturbations,
+    summarize_multiseed_runs,
+)
+from researchability.profiler.spec_checks import audit_table_figure_coverage
 from researchability.sandbox import SandboxRunResult
 
 _LABELED_METRIC_RE = re.compile(
@@ -540,6 +545,20 @@ def eval_g5_1_numeric_outcomes_match(ctx: EvaluationContext) -> GateResult:
     log_audit = audit_execution_logs(run_res, output_texts, claimed_ns)
     ctx.extracted_claims["execution_log_audit"] = log_audit
 
+    multiseed_flags: list[str] = []
+    seed_runs_raw: list[tuple[int, SandboxRunResult]] = ctx.extracted_claims.get(
+        "multiseed_sandbox_results", []
+    )
+    if seed_runs_raw:
+        seed_metric_pairs: list[tuple[int, dict[str, float]]] = []
+        for seed, srun in seed_runs_raw:
+            s_metrics = _extract_reproduced_metrics(srun, analysis_workdir)
+            seed_metric_pairs.append((seed, {m.normalized_name: m.value for m in s_metrics}))
+        multiseed_flags = summarize_multiseed_runs(seed_metric_pairs)
+        ctx.extracted_claims["multiseed_flags"] = multiseed_flags
+
+    combined_log_flags = [*log_audit.flags, *multiseed_flags]
+
     abs_tol = float(ctx.extracted_claims.get("numeric_abs_tol", _DEFAULT_ABS_TOL))
     rel_tol = float(ctx.extracted_claims.get("numeric_rel_tol", _DEFAULT_REL_TOL))
     comparisons = compare_numeric_outcomes(reported, reproduced, abs_tol=abs_tol, rel_tol=rel_tol)
@@ -553,7 +572,7 @@ def eval_g5_1_numeric_outcomes_match(ctx: EvaluationContext) -> GateResult:
                 f"Could not match numeric claims between paper ({len(reported)} extracted) "
                 f"and sandbox outputs ({len(reproduced)} extracted)."
             ),
-            flags=["NO_VERIFIABLE_NUMERIC_METRICS", *log_audit.flags],
+            flags=["NO_VERIFIABLE_NUMERIC_METRICS", *combined_log_flags],
         )
 
     mismatches = [c for c in comparisons if not c.matched]
@@ -566,9 +585,9 @@ def eval_g5_1_numeric_outcomes_match(ctx: EvaluationContext) -> GateResult:
         for c in comparisons
     ]
     evidence = [EvidenceItem(source="numeric_diff", excerpt="; ".join(summary_rows[:6]))]
-    if log_audit.flags:
+    if combined_log_flags:
         evidence.append(
-            EvidenceItem(source="execution_log_audit", excerpt="; ".join(log_audit.flags[:4]))
+            EvidenceItem(source="execution_log_audit", excerpt="; ".join(combined_log_flags[:4]))
         )
 
     if mismatches:
@@ -581,7 +600,7 @@ def eval_g5_1_numeric_outcomes_match(ctx: EvaluationContext) -> GateResult:
                 f"tolerance ({mismatch_names})."
             ),
             evidence=evidence,
-            flags=["NUMERIC_OUTCOME_MISMATCH", *log_audit.flags],
+            flags=["NUMERIC_OUTCOME_MISMATCH", *combined_log_flags],
         )
 
     return GateResult(
@@ -589,7 +608,7 @@ def eval_g5_1_numeric_outcomes_match(ctx: EvaluationContext) -> GateResult:
         status=GateStatus.PASS,
         rationale=f"All {len(comparisons)} matched numeric outcome(s) agree within tolerance.",
         evidence=evidence,
-        flags=list(log_audit.flags),
+        flags=combined_log_flags,
     )
 
 
@@ -618,6 +637,14 @@ def eval_g5_2_figures_regenerate(ctx: EvaluationContext) -> GateResult:
             valid_artifacts.append(rel)
 
     ctx.extracted_claims["regenerated_artifacts"] = valid_artifacts
+    code_texts = ctx.read_text_files(ctx.paper.artifacts.code_files)
+    coverage = audit_table_figure_coverage(
+        ctx.manuscript_snippet(),
+        code_texts,
+        [*valid_artifacts, *ctx.paper.artifacts.data_files],
+    )
+    ctx.extracted_claims["table_figure_coverage"] = coverage
+
     if valid_artifacts:
         return GateResult(
             gate_id="G5.2_FIGURES_REGENERATE",
@@ -631,12 +658,14 @@ def eval_g5_2_figures_regenerate(ctx: EvaluationContext) -> GateResult:
                     excerpt=", ".join(valid_artifacts[:10]),
                 )
             ],
+            flags=list(coverage.flags),
         )
 
     return GateResult(
         gate_id="G5.2_FIGURES_REGENERATE",
         status=GateStatus.FAIL,
         rationale="Stage 4 execution produced no non-empty figure or table artifacts.",
+        flags=list(coverage.flags),
     )
 
 
@@ -715,6 +744,9 @@ def render_human_dossier(
     hygiene_audit: dict[str, Any] | None = None,
     dependency_audit: Any | None = None,
     execution_log_audit: Any | None = None,
+    table_figure_coverage: Any | None = None,
+    quantitative_robustness: Any | None = None,
+    distributional_verification: Any | None = None,
 ) -> str:
     """Render an I4R-style human review & debate dossier in Markdown."""
     score_pct = (
@@ -846,6 +878,55 @@ def render_human_dossier(
     if log_lines:
         lines.extend(["", "## Execution Log & Effective-N Audit (G5.1)", "", *log_lines])
 
+    cov = _as_dict(table_figure_coverage)
+    if cov.get("claimed_items"):
+        claimed_s = ", ".join(f"`{x}`" for x in cov.get("claimed_items", []))
+        matched_s = ", ".join(f"`{x}`" for x in cov.get("matched_items", [])) or "none"
+        uncov_s = ", ".join(f"`{x}`" for x in cov.get("uncovered_items", [])) or "none"
+        lines.extend(
+            [
+                "",
+                "## Table & Figure Coverage Audit (G5.2)",
+                "",
+                f"- **Claimed items:** {claimed_s}",
+                f"- **Matched items:** {matched_s}",
+                f"- **Uncovered items:** {uncov_s}",
+            ]
+        )
+
+    dist = _as_dict(distributional_verification)
+    if dist:
+        m_diff = dist.get("mean_diff")
+        q_diff = dist.get("quantile_max_diff")
+        lines.extend(
+            [
+                "",
+                "## Subsampled Distributional Verification (G4.1 Fallback)",
+                "",
+                f"- **KS statistic:** {dist.get('ks_stat')} (matched={dist.get('matched')})",
+                f"- **Mean diff / max quantile diff:** {m_diff} / {q_diff}",
+            ]
+        )
+
+    qrob = _as_dict(quantitative_robustness)
+    if qrob.get("raw_p_values") or qrob.get("winsorize_sign_flips"):
+        q_lines = [
+            "",
+            "## Quantitative Robustness Perturbations (G5.3)",
+            "",
+        ]
+        p_vals = qrob.get("raw_p_values") or []
+        if p_vals:
+            q_lines.append(
+                f"- **Multiple-testing perturbation ({len(p_vals)} p-value(s)):** "
+                f"{qrob.get('raw_significant', 0)} significant at alpha=0.05 -> "
+                f"{qrob.get('bh_fdr_significant', 0)} under BH-FDR -> "
+                f"{qrob.get('bonferroni_significant', 0)} under Bonferroni"
+            )
+        for flip in qrob.get("winsorize_sign_flips") or []:
+            q_lines.append(f"- **Tail-trimming sign flip:** `{flip}`")
+        lines.extend(q_lines)
+
     checks = robustness_checks or _suggest_robustness_checks(
         report.profile,
         report.human_review_flags,
@@ -861,7 +942,14 @@ def render_human_dossier(
 def eval_g5_3_human_dossier_ready(ctx: EvaluationContext) -> GateResult:
     """Synthesize I4R-style human review dossier from upstream results (G5.3)."""
     prelim_results: list[GateResult] = list(ctx.extracted_claims.get("preliminary_results", []))
-    all_flags = sorted({flag for res in prelim_results for flag in res.flags})
+    qrob = run_quantitative_perturbations(
+        ctx.manuscript_snippet(),
+        data_profiles=ctx.extracted_claims.get("data_profiles"),
+        data_paths=ctx.resolve_relative_files(ctx.paper.artifacts.data_files),
+    )
+    ctx.extracted_claims["quantitative_robustness"] = qrob
+
+    all_flags = sorted({*(flag for res in prelim_results for flag in res.flags), *qrob.flags})
     failed = [res for res in prelim_results if res.status == GateStatus.FAIL]
     checks = _suggest_robustness_checks(ctx.paper.primary_profile, all_flags, failed)
 
@@ -903,6 +991,9 @@ def eval_g5_3_human_dossier_ready(ctx: EvaluationContext) -> GateResult:
             hygiene_audit=ctx.extracted_claims.get("hygiene_audit"),
             dependency_audit=ctx.extracted_claims.get("dependency_audit"),
             execution_log_audit=ctx.extracted_claims.get("execution_log_audit"),
+            table_figure_coverage=ctx.extracted_claims.get("table_figure_coverage"),
+            quantitative_robustness=qrob,
+            distributional_verification=ctx.extracted_claims.get("distributional_verification"),
         )
 
     return GateResult(
@@ -918,6 +1009,7 @@ def eval_g5_3_human_dossier_ready(ctx: EvaluationContext) -> GateResult:
                 excerpt="; ".join(checks[:3]),
             )
         ],
+        flags=list(qrob.flags),
     )
 
 

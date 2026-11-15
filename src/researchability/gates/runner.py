@@ -121,6 +121,9 @@ def evaluate_stage0_to_5_with_context(
             hygiene_audit=ctx.extracted_claims.get("hygiene_audit"),
             dependency_audit=ctx.extracted_claims.get("dependency_audit"),
             execution_log_audit=ctx.extracted_claims.get("execution_log_audit"),
+            table_figure_coverage=ctx.extracted_claims.get("table_figure_coverage"),
+            quantitative_robustness=ctx.extracted_claims.get("quantitative_robustness"),
+            distributional_verification=ctx.extracted_claims.get("distributional_verification"),
         )
 
     return report, ctx

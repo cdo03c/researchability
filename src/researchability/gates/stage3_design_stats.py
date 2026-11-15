@@ -8,6 +8,7 @@ from researchability.gates.base import EvaluationContext, run_llm_gate
 from researchability.llm.client import ModelTier
 from researchability.models import EvidenceItem, GateResult, GateStatus
 from researchability.profiler.forensics import extract_claimed_sample_sizes
+from researchability.profiler.spec_checks import audit_model_specifications
 
 _POWER_RE = re.compile(
     r"(power analysis|statistical power|sample[- ]size calculation|minimum detectable|"
@@ -239,6 +240,9 @@ def eval_g3_6_leakage_hygiene(ctx: EvaluationContext) -> GateResult:
                 )
             )
 
+    spec_audit = audit_model_specifications(ctx.manuscript_snippet(), code_texts)
+    ctx.extracted_claims["spec_audit"] = spec_audit
+
     if suspicious:
         return GateResult(
             gate_id="G3.6_LEAKAGE_HYGIENE",
@@ -247,9 +251,25 @@ def eval_g3_6_leakage_hygiene(ctx: EvaluationContext) -> GateResult:
             rationale="Suspected data leakage: fit/fit_transform invoked before train_test_split.",
             evidence=suspicious,
             flags=[
-                f"Suspected preprocessing before train_test_split in {item.source}"
-                for item in suspicious
+                *[
+                    f"Suspected preprocessing before train_test_split in {item.source}"
+                    for item in suspicious
+                ],
+                *spec_audit.flags,
             ],
+        )
+
+    explicit_spec_mismatch = [f for f in spec_audit.flags if f.startswith("SPECIFICATION_MISMATCH")]
+    if explicit_spec_mismatch:
+        return GateResult(
+            gate_id="G3.6_LEAKAGE_HYGIENE",
+            status=GateStatus.FAIL,
+            confidence=0.8,
+            rationale="Model specification mismatch between code and manuscript claims.",
+            evidence=[
+                EvidenceItem(source="spec_audit", excerpt=m) for m in explicit_spec_mismatch[:3]
+            ],
+            flags=list(spec_audit.flags),
         )
 
     return GateResult(
@@ -257,6 +277,7 @@ def eval_g3_6_leakage_hygiene(ctx: EvaluationContext) -> GateResult:
         status=GateStatus.PASS,
         confidence=0.75,
         rationale="No static pre-split leakage patterns detected in code.",
+        flags=list(spec_audit.flags),
     )
 
 

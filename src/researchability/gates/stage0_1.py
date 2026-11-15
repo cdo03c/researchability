@@ -7,6 +7,13 @@ import re
 from researchability.gates.base import EvaluationContext, run_llm_gate
 from researchability.llm.client import ModelTier
 from researchability.models import ArtifactStatus, EvidenceItem, GateResult, GateStatus
+from researchability.profiler.forensics import extract_claimed_sample_sizes
+from researchability.profiler.robustness import (
+    PreregRecord,
+    diff_preregistration_against_paper,
+    fetch_preregistration_summary,
+)
+from researchability.profiler.spec_checks import audit_data_lineage
 
 _PREP_NAME_RE = re.compile(
     r"(prep|preprocess|clean|etl|ingest|split|build_dataset|make_dataset|curate|filter)",
@@ -236,7 +243,17 @@ def eval_g1_4_code_non_stub(ctx: EvaluationContext) -> GateResult:
 
 
 def eval_g1_5_data_prep_code(ctx: EvaluationContext) -> GateResult:
-    """Verify whether data-preparation or preprocessing scripts exist."""
+    """Verify whether data-preparation scripts exist and raw->cleaned lineage is intact."""
+    texts = ctx.read_text_files(ctx.paper.artifacts.code_files)
+    readme_texts = ctx.read_text_files(ctx.paper.artifacts.readme_files)
+    lineage = audit_data_lineage(
+        texts,
+        ctx.paper.artifacts.data_files,
+        readme_texts=readme_texts,
+        paper_text=ctx.manuscript_snippet(),
+    )
+    ctx.extracted_claims["lineage_audit"] = lineage
+
     prep_named = [p for p in ctx.paper.artifacts.code_files if _PREP_NAME_RE.search(p)]
     if prep_named:
         return GateResult(
@@ -244,24 +261,36 @@ def eval_g1_5_data_prep_code(ctx: EvaluationContext) -> GateResult:
             status=GateStatus.PASS,
             rationale="Dedicated data-preparation script(s) identified by filename.",
             evidence=[EvidenceItem(source="code_files", excerpt=", ".join(prep_named[:5]))],
+            flags=list(lineage.flags),
         )
 
-    texts = ctx.read_text_files(ctx.paper.artifacts.code_files)
     for path, content in texts.items():
         match = _PREP_CODE_RE.search(content)
-        if match:
+        if match and not lineage.only_processed_without_prep:
             return GateResult(
                 gate_id="G1.5_DATA_PREP_CODE",
                 status=GateStatus.PASS,
                 rationale="Data ingestion/preparation transforms found in code.",
                 evidence=[EvidenceItem(source=path, excerpt=match.group(0))],
+                flags=list(lineage.flags),
             )
+
+    if lineage.only_processed_without_prep:
+        return GateResult(
+            gate_id="G1.5_DATA_PREP_CODE",
+            status=GateStatus.FAIL,
+            rationale=(
+                "Only cleaned/processed datasets detected with no upstream raw-data cleaning "
+                "script or restricted raw-data disclosure."
+            ),
+            flags=list(lineage.flags),
+        )
 
     return GateResult(
         gate_id="G1.5_DATA_PREP_CODE",
         status=GateStatus.FAIL,
         rationale="No data preparation or preprocessing code detected.",
-        flags=["Only analysis/eval or no data-prep scripts found"],
+        flags=["Only analysis/eval or no data-prep scripts found", *lineage.flags],
     )
 
 
@@ -299,15 +328,39 @@ def eval_g1_6_method_completeness(ctx: EvaluationContext) -> GateResult:
     )
 
 
+def _check_prereg_diff_flags(ctx: EvaluationContext, prereg_urls: list[str]) -> list[str]:
+    cached = ctx.extracted_claims.get("prereg_record")
+    record: PreregRecord | None = cached if isinstance(cached, PreregRecord) else None
+    if (
+        record is None
+        and prereg_urls
+        and bool(ctx.extracted_claims.get("check_prereg_registry", False))
+    ):
+        record = fetch_preregistration_summary(
+            prereg_urls[0],
+            http_get=ctx.extracted_claims.get("prereg_http_get"),
+        )
+        if record is not None:
+            ctx.extracted_claims["prereg_record"] = record
+    if record is None:
+        return []
+    claimed_ns = ctx.extracted_claims.get("claimed_n") or extract_claimed_sample_sizes(
+        ctx.manuscript_snippet()
+    )
+    return diff_preregistration_against_paper(record, ctx.manuscript_snippet(), claimed_ns)
+
+
 def eval_g1_7_preregistration_disclosed(ctx: EvaluationContext) -> GateResult:
     """Check whether preregistration/PAP or exploratory status is explicitly disclosed."""
     prereg_links = [lnk for lnk in ctx.paper.artifacts.links if lnk.kind == "prereg"]
     if prereg_links:
+        diff_flags = _check_prereg_diff_flags(ctx, [lnk.url for lnk in prereg_links])
         return GateResult(
             gate_id="G1.7_PREREGISTRATION_DISCLOSED",
             status=GateStatus.PASS,
             rationale="Preregistration link detected.",
             evidence=[EvidenceItem(source="artifacts", excerpt=prereg_links[0].url)],
+            flags=diff_flags,
         )
 
     def fallback(c: EvaluationContext) -> GateResult:

@@ -6,6 +6,13 @@ import re
 
 from researchability.gates.base import EvaluationContext, run_llm_gate
 from researchability.models import EvidenceItem, GateResult, GateStatus
+from researchability.profiler.forensics import extract_claimed_sample_sizes
+from researchability.profiler.robustness import (
+    PreregRecord,
+    diff_preregistration_against_paper,
+    fetch_preregistration_summary,
+)
+from researchability.profiler.spec_checks import audit_model_specifications
 
 _RRID_AUTH_RE = re.compile(
     r"\b(RRID:[A-Za-z]+_[A-Za-z0-9-]+|STR\s+profil(?:ing|ed)|short\s+tandem\s+repeat|"
@@ -81,6 +88,34 @@ def eval_g1_10_psych_pap_adherence(ctx: EvaluationContext) -> GateResult:
             or (link.host == "osf" and is_reg)
         ]
         if prereg_links:
+            cached = c.extracted_claims.get("prereg_record")
+            record: PreregRecord | None = cached if isinstance(cached, PreregRecord) else None
+            if record is None and bool(c.extracted_claims.get("check_prereg_registry", False)):
+                record = fetch_preregistration_summary(
+                    prereg_links[0],
+                    http_get=c.extracted_claims.get("prereg_http_get"),
+                )
+                if record is not None:
+                    c.extracted_claims["prereg_record"] = record
+            diff_flags = (
+                diff_preregistration_against_paper(
+                    record,
+                    c.manuscript_snippet(),
+                    c.extracted_claims.get("claimed_n")
+                    or extract_claimed_sample_sizes(c.manuscript_snippet()),
+                )
+                if record is not None
+                else []
+            )
+            if diff_flags:
+                return GateResult(
+                    gate_id="G1.10_PSYCH_PAP_ADHERENCE",
+                    status=GateStatus.FAIL,
+                    confidence=0.85,
+                    rationale="Preregistered plan differs from published N or primary outcomes.",
+                    evidence=[EvidenceItem(source="prereg_diff", excerpt="; ".join(diff_flags))],
+                    flags=diff_flags,
+                )
             return GateResult(
                 gate_id="G1.10_PSYCH_PAP_ADHERENCE",
                 status=GateStatus.PASS,
@@ -253,19 +288,33 @@ def eval_g3_10_econ_robustness_specification(ctx: EvaluationContext) -> GateResu
             ],
             "data_files": c.paper.artifacts.data_files,
         }
-        passed = len(hits) >= 1
+        spec_res = audit_model_specifications(
+            c.manuscript_snippet(),
+            c.read_text_files(c.paper.artifacts.code_files),
+        )
+        c.extracted_claims["spec_audit"] = spec_res
+        explicit_mm = [f for f in spec_res.flags if f.startswith("SPECIFICATION_MISMATCH")]
+        passed = len(hits) >= 1 and not explicit_mm
+        rationale = (
+            f"Specification mismatch between code and paper: {explicit_mm[0]}"
+            if explicit_mm
+            else (
+                f"Alternative/placebo robustness checks documented ({', '.join(hits[:4])})."
+                if hits
+                else "No placebo, specification sensitivity, or alternative estimator checks found."
+            )
+        )
         return GateResult(
             gate_id="G3.10_ECON_ROBUSTNESS_SPECIFICATION",
             status=GateStatus.PASS if passed else GateStatus.FAIL,
             confidence=0.85,
-            rationale=(
-                f"Alternative/placebo robustness checks documented ({', '.join(hits[:4])})."
-                if passed
-                else "No placebo, specification sensitivity, or alternative estimator checks found."
-            ),
+            rationale=rationale,
             evidence=[EvidenceItem(source="manuscript", excerpt=", ".join(hits[:5]))]
             if hits
-            else [],
+            else (
+                [EvidenceItem(source="spec_audit", excerpt=explicit_mm[0])] if explicit_mm else []
+            ),
+            flags=list(spec_res.flags),
         )
 
     return run_llm_gate(
