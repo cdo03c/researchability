@@ -24,9 +24,9 @@ from researchability.models import (
 runner = CliRunner()
 
 
-def test_package_version_is_0_0_0() -> None:
-    assert __version__ == "0.0.0"
-    assert version("researchability") == "0.0.0"
+def test_package_version_matches_release() -> None:
+    assert __version__ == "1.0.0"
+    assert version("researchability") == __version__
 
 
 def test_cli_help_lists_subcommands() -> None:

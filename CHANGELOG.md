@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-15
+
 ### Security & Hardening
 - Hardened sandbox, storage, extraction, and network boundaries:
   - Disabled execution of arbitrary repository `Dockerfile`s by default (`SandboxConfig.allow_repo_dockerfile = False`) and added `--pids-limit=256`, `--ipc=none`, `--ulimit=nofile=1024:1024`, shell-escaped `shlex.quote` manifest paths, and streamed capped subprocess capture (`default_subprocess_runner`).
