@@ -9,7 +9,7 @@ uv run pre-commit install
 
 ## Quality Checks
 
-GitHub Actions CI runs these checks on every push and pull request to `main` and `*-SNAPSHOT` development branches (such as `1.0.0-SNAPSHOT`):
+GitHub Actions CI runs these checks on every push and pull request to `main` and `*-SNAPSHOT` development branches (such as `1.1.0-SNAPSHOT`):
 
 ```bash
 uv run ruff check .

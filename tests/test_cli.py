@@ -24,8 +24,8 @@ from researchability.models import (
 runner = CliRunner()
 
 
-def test_package_version_matches_release() -> None:
-    assert __version__ == "1.0.0"
+def test_package_version_matches_metadata() -> None:
+    assert __version__ == "1.1.0.dev0"
     assert version("researchability") == __version__
 
 
