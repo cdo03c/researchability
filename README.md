@@ -1,10 +1,14 @@
 # Researchability
 
+[![CI](https://github.com/cdo03c/researchability/actions/workflows/ci.yml/badge.svg)](https://github.com/cdo03c/researchability/actions/workflows/ci.yml)
+[![Docs](https://github.com/cdo03c/researchability/actions/workflows/docs.yml/badge.svg)](https://github.com/cdo03c/researchability/actions/workflows/docs.yml)
+
 Automated, staged binary-gate reproducibility and research integrity scoring engine, inspired by the [Institute for Replication (I4R)](https://www.i4replication.org/).
 
 ## Features
 
 - **Staged Binary Gates (`configs/gates.yaml`):** Stages 0–5 covering reporting transparency, incentive biases, materials/environment variability, study design & power, statistical rigor, data integrity forensics, sandboxed execution, and numerical output fidelity.
+- **I4R-Derived Hygiene & Forensic Screeners:** Static README-to-repo inventory diffs, duplicate/output-collision detection, dependency manifest & opt-in PyPI/CRAN liveness checks, public PII and sentinel missing-code scans, regression star/CI/GRIM/effect-bound forensics, and post-run convergence & effective-`N` log auditing.
 - **Non-Punitive Blocking Semantics:** Separates `FAIL` from `BLOCKED_HARDWARE`, `BLOCKED_ACCESS`, `BLOCKED_DATA_SIZE`, and `N/A`.
 - **Zero-Touch vs. Repaired Execution Tracking:** Distinguishes out-of-the-box execution from minor diff-logged repairs.
 - **Reproducible Gemini API Integration:** `google-genai` wrapper with strict Pydantic structured outputs, model tiering, and deterministic SQLite response caching.
@@ -31,6 +35,7 @@ uv run mypy src
 
 ## Documentation & Changelog
 
-- Documentation lives in [`docs/`](docs/index.md) and builds with `uv sync --extra docs && uv run mkdocs build --strict`.
+- Start with the [**User Guide**](docs/user-guide.md) for what Researchability does and how to run it step by step.
+- Full documentation lives in [`docs/`](docs/index.md) and builds with `uv sync --extra docs && uv run mkdocs build --strict`.
 - Release history is tracked in [`CHANGELOG.md`](CHANGELOG.md).
 - License: [`LICENSE`](LICENSE) (MIT).

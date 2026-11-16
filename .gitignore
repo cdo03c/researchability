@@ -18,6 +18,8 @@ build/
 .researchability_cache/
 *.sqlite
 *.db
+*.duckdb
+results/
 artifacts/
 workspaces/
 site/

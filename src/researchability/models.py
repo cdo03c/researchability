@@ -203,6 +203,13 @@ class AuditReport(BaseModel):
             "Weighted pass rate across all scorable gates (0.0-1.0), or None if none scorable."
         ),
     )
+    core_composite_score: float | None = Field(
+        default=None,
+        description=(
+            "Weighted pass rate strictly across FieldProfile.CORE scorable gates for "
+            "apples-to-apples cross-field comparisons."
+        ),
+    )
     unweighted_pass_rate: float | None = None
     zero_touch_reproducible: bool | None = None
     repaired_reproducible: bool | None = None

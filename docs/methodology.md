@@ -26,8 +26,8 @@ Gates form a directed acyclic graph across Stages 0–5:
 | :--- | :--- | :--- |
 | **Poor Reporting & Transparency** | Stage 1 | `G1.1`–`G1.6` (data/code links, non-stub code, data-prep scripts, methods completeness) |
 | **Publication & Incentive Biases** | Stage 1 | `G1.7` (preregistration/PAP disclosure), `G1.8` (limitations & null/negative reporting) |
-| **Material & Technical Variability** | Stage 2 | `G2.1`–`G2.7` (`README`, pinned manifests, seeds, hardware specs, bio accessions, wet-lab RRIDs) |
+| **Material & Technical Variability** | Stage 2 | `G2.1`–`G2.9` (`README` inventory & collision hygiene, pinned manifests, undeclared/unpinned imports, seeds, hardware specs, bio accessions, wet-lab RRIDs) |
 | **Study Design & Execution Flaws** | Stage 3 | `G3.1`–`G3.3` (sample sizes, power/budget justification, controls & baselines) |
-| **Statistical & Analytical Issues** | Stage 3 | `G3.4`–`G3.6` (effect sizes + uncertainty, multiple-testing control, leakage hygiene) |
-| **Data Integrity & Misconduct Screening** | Stage 3 | `G3.7`–`G3.9` (data parses & matches `N`, exclusion audit, GRIM/statcheck/sum checks) |
-| **Execution & Output Fidelity** | Stages 4–5 | `G4.1`–`G5.3` (zero-touch vs. repaired execution, metric matching, figure regeneration, human dossier) |
+| **Statistical & Analytical Issues** | Stage 3 | `G3.4`–`G3.6`, `G3.10` (effect sizes + uncertainty, multiple-testing control, leakage hygiene, econometric robustness specs) |
+| **Data Integrity & Misconduct Screening** | Stage 3 | `G3.7`–`G3.9` (data parses & matches `N`, PII/sentinel screening, exclusion/`NA->0` audit, GRIM/statcheck/star/CI/effect-bound checks) |
+| **Execution & Output Fidelity** | Stages 4–5 | `G4.1`–`G5.3` (zero-touch vs. repaired execution, convergence/singleton/effective-`N` log audit, metric matching, figure regeneration, human dossier) |
